@@ -1,0 +1,7 @@
+# requirements.txt
+sentence-transformers
+tiktoken
+numpy
+google-generativeai
+openai
+transformers

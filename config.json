@@ -1,0 +1,40 @@
+{
+  "llm_provider": "gemini",
+  "llm_config": {
+    "gemini": {
+      "api_key": "YOUR_GEMINI_API_KEY_HERE",
+      "model_name": "gemini-1.5-flash-latest",
+      "context_window": 1000000,
+      "proxy": "http://127.0.0.1:10808",
+      "temperature": 0.5
+    },
+    "deepseek": {
+      "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
+      "base_url": "https://api.deepseek.com/v1",
+      "model_name": "deepseek-chat",
+      "context_window": 65536,
+      "tokenizer_path": "./deepseek_v2_tokenizer",
+      "temperature": 0.7
+    }
+  },
+  "prompt_templates": {
+    "daily_report": {
+      "description": "根据OCR记录生成一份专业的工作日报。",
+      "system_prompt": "你是一位高效的个人助理，你的任务是分析用户提供的屏幕操作记录（OCR文本），并从中提炼出当天的工作重点，生成一份结构清晰、重点突出的工作日报。",
+      "chunk_summary_prompt": "请对以下OCR操作记录进行初步总结，提炼出关键的操作、意图和信息，为最终生成日报做准备：\n\n{chunk_text}",
+      "final_report_prompt": "请基于以下所有分段摘要信息，以日报形式输出我今天的工作内容。报告应包含【主要任务】、【完成情况】和【遇到的问题】等部分。格式清晰，语言专业：\n\n{all_summaries}"
+    },
+    "tutorial_generator": {
+      "description": "根据OCR记录的操作步骤，生成一份详细的教程或操作指引。",
+      "system_prompt": "你是一位优秀的技术文档工程师，精通编写清晰易懂的操作教程。你的任务是分析用户提供的屏幕操作记录（OCR文本），并将其整理成一份按步骤排列、逻辑清晰的操作指南。",
+      "chunk_summary_prompt": "请对以下OCR操作记录进行初步梳理，按时间顺序整理出核心的操作步骤和关键信息：\n\n{chunk_text}",
+      "final_report_prompt": "请基于以下所有操作记录摘要，生成一份完整的操作教程。教程应有一个明确的标题，并以'步骤一'、'步骤二'等形式列出所有操作。请确保描述清晰、准确，适合初学者阅读：\n\n{all_summaries}"
+    }
+  },
+  "high_similarity_threshold": 0.95,
+  "min_diff_chars": 50,
+  "direct_summary_threshold": 800000,
+  "token_headroom": 4096,
+  "tokenizer_safety_margin": 0.9,
+  "output_path": "./reports"
+}

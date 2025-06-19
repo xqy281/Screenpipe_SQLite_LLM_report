@@ -3,10 +3,11 @@
   "llm_config": {
     "gemini": {
       "api_key": "YOUR_GEMINI_API_KEY_HERE",
-      "model_name": "gemini-1.5-flash-latest",
+      "model_name": "gemini-1.5-flash",
       "context_window": 1000000,
       "proxy": "http://127.0.0.1:10808",
-      "temperature": 0.5
+      "temperature": 0.5,
+      "api_call_delay_seconds": 10
     },
     "deepseek": {
       "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
@@ -14,7 +15,8 @@
       "model_name": "deepseek-chat",
       "context_window": 65536,
       "tokenizer_path": "./deepseek_v2_tokenizer",
-      "temperature": 0.7
+      "temperature": 0.7,
+      "api_call_delay_seconds": 0
     }
   },
   "prompt_templates": {

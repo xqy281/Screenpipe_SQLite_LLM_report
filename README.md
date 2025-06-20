@@ -1,54 +1,61 @@
 # Screenpipe 智能分析与内容生成引擎
 
-一个灵活、可配置的工具，能将您的 Screenpipe 本地 OCR 数据转化为结构化的内容，如工作日报、操作教程等。它作为一个“底层数据插座”，通过可定制的提示词模板，将原始的操作记录接入强大的大语言模型，实现多样化的内容创作。
+**一个支持多模态输入、可迭代工作流的LLM应用框架**
+
+本工具将您的 Screenpipe 本地 OCR 数据转化为一个强大的“数据插座”，通过可定制的提示词模板和先进的多模态能力，将原始的操作记录接入大语言模型，实现从专业工作日报、操作教程到结合流程图的SOP（标准作业程序）等多样化、高质量的内容创作。
+
+它不仅仅是一个脚本，更是一个支持**调试、迭代和优化**的完整内容生成工作流。
 
 ## 核心功能
 
--   **直连本地数据**: 直接安全地连接本地 Screenpipe SQLite 数据库，无需通过网络或第三方服务。
+-   **直连本地数据**: 直接安全地连接本地 Screenpipe SQLite 数据库，自动处理**时区转换**，确保数据拉取的准确性。
 -   **智能数据清洗**: 结合文本相似度（`sentence-transformers`）和差异对比（`difflib`），有效去除冗余和无意义的屏幕记录，提取高价值信息。
--   **精准分段策略**:
-    -   支持 **本地精确分词**（已集成 DeepSeek Tokenizer），确保发送给 API 的数据块（Chunk）大小不超出模型上下文限制。
-    -   对于其他模型，采用**安全系数**策略，保证处理超长文本时的稳定性。
--   **多模型支持**: 内置对 Google Gemini 和 OpenAI 兼容 API（如 DeepSeek）的支持，并可通过配置文件轻松扩展。
+-   **工业级分词与分段策略**:
+    -   **模型专属精确计算**: 自动为 Gemini 调用官方 API、为 DeepSeek 加载本地 Tokenizer 进行**精确 Token 计算**，告别估算误差。
+    -   **极致性能算法**: 采用**“预计算+指针累加”**策略进行快速粗分，结合**“动态比例移除”**策略进行高效精修，将数十分钟的分段耗时优化至数秒。
+-   **多模态输入**: 支持通过命令行传入**图片附件**（如业务流程图），在使用 Gemini 等多模态模型时，实现图文结合的深度分析。
 -   **高度可配置的任务系统**:
     -   通过 `config.json` 定义不同的**任务模板（Prompt Templates）**。
     -   每个模板包含独立的**系统提示词**、**分段摘要提示词**和**最终报告提示词**。
-    -   通过简单的命令行参数 `--task` 即可切换不同的生成任务（如 `daily_report` vs `tutorial_generator`）。
--   **灵活的参数调整**: 支持通过命令行临时覆盖模型（`--llm`）和温度（`--temperature`）等关键参数，方便调试和实验。
--   **动态文件名**: 生成的报告文件名包含时间戳、任务名和模型名，方便归档和溯源。
+    -   通过简单的命令行参数 `--task` 即可切换不同的生成任务。
+-   **会话式工作流与二次处理**:
+    -   **独立会话存储**: 每一次运行都会创建一个唯一的会话文件夹，存放当次生成的所有分段摘要和最终报告，便于归档和追踪。
+    -   **迭代式微调**: 支持通过 `--use_summaries_from` 参数加载之前生成的摘要文件，允许您在**手动修改摘要**后，跳过所有耗时步骤，以极低的成本快速重新生成最终报告。
+-   **灵活的参数调整**: 支持通过命令行临时覆盖模型（`--llm`）、温度（`--temperature`）等关键参数，方便调试和实验。
+-   **健壮的工程实践**: 内置时间戳日志、模型专属的API调用延迟、全局代理设置等，确保程序运行稳定、可观测。
 
-## 项目结构
+## 工作流示意图
+
+本工具支持两种核心工作模式：
 
 ```
-your_project_folder/
-├── deepseek_v2_tokenizer/      <-- DeepSeek 本地 Tokenizer 文件
-│   ├── tokenizer.json
-│   ├── tokenizer.model
-│   ├── special_tokens_map.json
-│   └── tokenizer_config.json
-│
-├── main.py                     <-- 主程序脚本
-├── config.json                 <-- 核心配置文件
-├── requirements.txt            <-- Python 依赖
-└── reports/                    <-- 生成报告的输出目录
+[ 模式一: 完整运行 (From Scratch) ]
+                                                     +-------------------------+
+OCR数据 --> 清洗 --> 高效分段 --> [摘要1.txt, 摘要2.txt, ...] --> | 最终报告.md (主文件)    |
+   |         |        |              | (保存到会话文件夹)         | +-------------------------+
+ (耗时)    (较快)   (极快)                                     (保存到会话文件夹)
+
+[ 模式二: 微调运行 (Fine-tuning) ]
+                                [摘要1.txt, 摘要2.txt, ...] --> +-------------------------+
+                                   (从文件夹加载, 可手动修改)      | 最终报告.md (新版本)    |
+                                                                +-------------------------+
+                                                                (快速生成并保存到新文件夹)
 ```
 
 ## 安装与配置
 
-### 步骤 1: 克隆或下载项目
+### 步骤 1: 准备项目文件
 
-将项目文件保存在您的本地计算机上。
+将项目文件（`main.py`, `config.json`, `requirements.txt`等）保存在您的本地计算机上。
 
 ### 步骤 2: 准备 DeepSeek Tokenizer (如果使用)
-
-> **重要**: 这是确保对 DeepSeek 模型进行精确 Token 计算的关键步骤。
 
 1.  在项目根目录创建一个名为 `deepseek_v2_tokenizer` 的文件夹。
 2.  将 DeepSeek 官方提供的 Tokenizer 所有相关文件（`tokenizer.json`, `tokenizer.model`, `tokenizer_config.json` 等）放入此文件夹中。
 
 ### 步骤 3: 安装依赖
 
-在项目根目录的终端中，运行以下命令来安装所有必需的 Python 库：
+在项目根目录的终端中，运行以下命令：
 
 ```bash
 pip install -r requirements.txt
@@ -61,88 +68,53 @@ pip install -r requirements.txt
 -   **必须修改的项**:
     -   `llm_config.gemini.api_key`: 填入您的 Google Gemini API 密钥。
     -   `llm_config.deepseek.api_key`: 填入您的 DeepSeek API 密钥。
-
 -   **建议检查的项**:
-    -   `llm_config.gemini.proxy`: 如果您在中国大陆或其他需要代理的地区使用 Gemini，请确保代理地址正确。如果不需要，可以设为 `null` 或删除此行。
+    -   `llm_config.*.api_call_delay_seconds`: 为有速率限制的模型（如Gemini）设置一个合适的延迟（秒），对于无限制的模型（如DeepSeek）设为 `0`。
     -   `prompt_templates`: 您可以修改已有的提示词，或仿照现有格式添加您自己的任务模板。
 
 ## 使用方法
 
-所有操作都在项目根目录的终端中执行。
+### 模式一：完整运行
 
-### 基本用法
+从 Screenpipe 数据库拉取数据，完整执行所有步骤。
 
--   **生成一份默认的工作日报** (使用配置文件中默认的 `llm_provider`):
+-   **生成一份工作日报**:
     ```bash
-    python main.py
+    python main.py --task daily_report --llm gemini
     ```
 
--   **指定使用 `deepseek` 模型生成日报**:
+-   **结合流程图生成一份SOP文档**:
     ```bash
-    python main.py --llm deepseek
+    python main.py --task git_release_sop_generator --llm gemini --attachment "path/to/your/业务流程图.png"
     ```
 
-### 高级用法
-
--   **生成一份教程**:
-    通过 `--task` 参数选择在 `config.json` 中定义的 `tutorial_generator` 任务。
+-   **一个复杂的组合命令示例**:
     ```bash
-    python main.py --llm gemini --task tutorial_generator
+    python main.py --start_time "2025-06-20T09:00:00" --end_time "2025-06-20T18:00:00" --task tutorial_generator --llm deepseek --temperature 0.2
     ```
 
--   **指定时间范围**:
-    使用 `--start_time` 和 `--end_time` 参数来处理特定时间段的数据。
-    ```bash
-    python main.py --start_time "2025-06-18T09:00:00" --end_time "2025-06-18T18:00:00"
-    ```
+### 模式二：微调运行 (从已有摘要生成)
 
--   **临时调整 Temperature**:
-    使用 `--temperature` 参数覆盖配置文件中的设置，以获得不同风格的输出（值越低越确定，越高越有创意）。
-    ```bash
-    python main.py --llm deepseek --temperature 0.2
-    ```
+当您对一次“完整运行”生成的最终报告不满意时，可以使用此模式进行快速迭代。
 
--   **组合使用**:
+1.  **找到会话文件夹**: 在 `reports/` 目录下找到您想微调的那次运行的文件夹，例如 `reports/2025-06-20_110000_daily_report_gemini/`。
+2.  **手动修改摘要**: 进入其下的 `summaries/` 文件夹，用文本编辑器打开并修改一个或多个 `_summary.txt` 文件。
+3.  **执行微调命令**:
     ```bash
-    python main.py --start_time "2025-06-10T00:00:00" --end_time "2025-06-10T23:59:59" --llm deepseek --task tutorial_generator --temperature 0.5
-    ```
+    python main.py --task daily_report --llm gemini --use_summaries_from "reports/2025-06-20_110000_daily_report_gemini/summaries"
+    ```    程序将跳过所有耗时步骤，直接使用您修改后的摘要来生成一份新的最终报告。
 
 ## 如何扩展
 
 ### 添加一个新的任务模板
 
 1.  打开 `config.json` 文件。
-2.  在 `prompt_templates` 对象中，添加一个新的 `key` (例如 `"meeting_summary"`)。
+2.  在 `prompt_templates` 对象中，添加一个新的 `key` (例如 `"code_review_assistant"`)。
 3.  为这个 `key` 添加一个包含 `description`, `system_prompt`, `chunk_summary_prompt`, 和 `final_report_prompt` 的对象。
+4.  保存文件后，您就可以通过 `--task code_review_assistant` 来调用这个新任务了。
 
-**示例**: 添加一个“会议纪要”任务
-```json
-{
-  ...
-  "prompt_templates": {
-    "daily_report": { ... },
-    "tutorial_generator": { ... },
-    "meeting_summary": {
-      "description": "根据会议期间的屏幕操作和少量文本，生成一份会议纪要。",
-      "system_prompt": "你是一名专业的会议记录员，擅长从零散的信息中整理出条理清晰的会议纪要。",
-      "chunk_summary_prompt": "请总结以下会议期间的操作记录，提炼出讨论的要点和展示的关键内容：\n\n{chunk_text}",
-      "final_report_prompt": "请根据以下所有信息，生成一份完整的会议纪要。纪要应包含【会议主题】、【参会人员】、【主要议题】和【行动项】：\n\n{all_summaries}"
-    }
-  },
-  ...
-}
-```
-4.  保存文件后，您就可以通过以下命令来使用这个新任务了：
-    ```bash
-    python main.py --task meeting_summary
-    ```
+## 核心技术亮点
 
-### 添加新的大语言模型
-
-如果一个新的模型与 OpenAI API 兼容，您只需在 `config.json` 的 `llm_config` 中添加一个新的配置项即可。
-
-## 注意事项
-
--   本工具依赖于本地已安装并正常运行的 **Screenpipe** 应用。
--   使用大语言模型会产生 API 调用费用，请关注您的账户用量。
--   在 Windows 系统上首次运行 `sentence-transformers` 时，可能会出现关于 `symlinks` 的警告，这通常不影响程序功能。
+-   **分段算法**: 采用了“预计算+指针累加”的粗分策略，将循环中的字符串操作和重复计算降至最低。结合“动态比例移除”的精修策略，将API调用次数优化至理论最小值，实现了极致的运行效率。
+-   **多模态处理**: 通过 `Pillow` 库和对 `google-generativeai` SDK的封装，实现了文本与图像的混合输入，解锁了更深层次的分析能力。
+-   **时区自动校正**: 在程序入口处对所有输入时间进行 UTC 转换，从根本上解决了本地时间与数据库存储时间不一致的问题，保证了数据拉取的准确性。

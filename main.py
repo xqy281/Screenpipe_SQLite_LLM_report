@@ -8,7 +8,7 @@ import platform
 import time
 import math
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 # --- 动态导入检查 ---
@@ -18,6 +18,7 @@ try:
     import google.generativeai as genai
     from openai import OpenAI
     import transformers
+    from PIL import Image
 except ImportError as e:
     print(f"依赖库导入失败: {e}")
     print("请确保已通过 'pip install -r requirements.txt' 安装所有依赖。")
@@ -30,65 +31,141 @@ def log_with_timestamp(message: str):
     print(f"[{timestamp}] {message}")
 
 
-# --- 模块 1.6: LLM 接口模块 ---
-class LLMConnector:
-    # ... 此部分代码无变化 ...
-    def __init__(self, provider_name: str, provider_config: Dict[str, Any]):
-        self.provider_name = provider_name
+# *** 关键变更: 引入面向对象的 LLM 连接器架构 ***
+
+
+class BaseLLMConnector:
+    """所有 LLM 连接器的基类，定义了统一的接口。"""
+
+    def __init__(self, provider_config: Dict[str, Any]):
         self.provider_config = provider_config
+        self.model_name = provider_config.get("model_name")
         self.client = self._initialize_client()
         log_with_timestamp(
-            f"🤖 LLM 连接器已为 provider 初始化: {self.provider_name} (模型: {self.provider_config.get('model_name')})"
+            f"🤖 {self.__class__.__name__} 已初始化 (模型: {self.model_name})"
         )
 
     def _initialize_client(self):
-        if self.provider_name == "gemini":
-            genai.configure(api_key=self.provider_config["api_key"])
-            return genai.GenerativeModel(self.provider_config["model_name"])
-        elif self.provider_name == "deepseek":
-            return OpenAI(
-                api_key=self.provider_config["api_key"],
-                base_url=self.provider_config["base_url"],
-            )
-        else:
-            raise ValueError(f"不支持的 LLM provider: {self.provider_name}")
+        raise NotImplementedError
 
     def generate(
         self,
         user_prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
     ) -> str:
-        log_with_timestamp(f"🚀 发起真实 LLM API 调用 (Temperature: {temperature})...")
+        raise NotImplementedError
+
+    def count_tokens(self, text: str) -> int:
+        raise NotImplementedError
+
+
+class GeminiConnector(BaseLLMConnector):
+    """处理 Google Gemini 模型的连接器。"""
+
+    def _initialize_client(self):
+        genai.configure(api_key=self.provider_config["api_key"])
+        return genai.GenerativeModel(self.model_name)
+
+    def generate(
+        self,
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ) -> str:
+        log_with_timestamp(f"🚀 发起 Gemini API 调用 (Temperature: {temperature})...")
         try:
-            if self.provider_name == "gemini":
-                generation_config = genai.types.GenerationConfig(
-                    temperature=temperature
-                )
-                full_prompt = (
-                    f"{system_prompt}\n\n---\n\n{user_prompt}"
-                    if system_prompt
-                    else user_prompt
-                )
-                response = self.client.generate_content(
-                    full_prompt, generation_config=generation_config
-                )
-                return response.text
-            elif self.provider_name == "deepseek":
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": user_prompt})
-                chat_completion = self.client.chat.completions.create(
-                    messages=messages,
-                    model=self.provider_config["model_name"],
-                    temperature=temperature,
-                )
-                return chat_completion.choices[0].message.content
+            generation_config = genai.types.GenerationConfig(temperature=temperature)
+            content = [user_prompt]
+            if attachment_data:
+                if attachment_type == "image":
+                    log_with_timestamp("  - 正在将图片附件添加到 Gemini 请求中...")
+                    content.append(attachment_data)
+                elif attachment_type == "text":
+                    content[0] = (
+                        f"### 补充上下文:\n{attachment_data}\n\n### 主要任务:\n{user_prompt}"
+                    )
+            if system_prompt:
+                content[0] = f"{system_prompt}\n\n---\n\n{content[0]}"
+            response = self.client.generate_content(
+                content, generation_config=generation_config
+            )
+            return response.text
         except Exception as e:
-            log_with_timestamp(f"❌ LLM API 调用失败: {e}")
+            log_with_timestamp(f"❌ Gemini API 调用失败: {e}")
             return f"[LLM 调用错误: {e}]"
         return "[LLM 调用返回空]"
+
+    def count_tokens(self, text: str) -> int:
+        return self.client.count_tokens(text).total_tokens
+
+
+class DeepSeekConnector(BaseLLMConnector):
+    """处理 DeepSeek 和其他 OpenAI 兼容 API 的连接器。"""
+
+    def _initialize_client(self):
+        return OpenAI(
+            api_key=self.provider_config["api_key"],
+            base_url=self.provider_config["base_url"],
+        )
+
+    def generate(
+        self,
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ) -> str:
+        log_with_timestamp(f"🚀 发起 DeepSeek API 调用 (Temperature: {temperature})...")
+
+        # 当前的保护性措施
+        if attachment_type == "image":
+            log_with_timestamp(
+                "❌ 错误: DeepSeek 的 OpenAI 兼容 API 当前不支持直接的图像输入。"
+            )
+            log_with_timestamp(
+                "   (模型本身具备多模态能力，但需要等待官方更新其公共API以支持此功能)"
+            )
+            return "[错误: 此模型 API 不支持图像输入]"
+
+        try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if attachment_type == "text" and attachment_data:
+                user_prompt = f"### 补充上下文:\n{attachment_data}\n\n### 主要任务:\n{user_prompt}"
+            messages.append({"role": "user", "content": user_prompt})
+            chat_completion = self.client.chat.completions.create(
+                messages=messages, model=self.model_name, temperature=temperature
+            )
+            return chat_completion.choices[0].message.content
+        except Exception as e:
+            log_with_timestamp(f"❌ DeepSeek API 调用失败: {e}")
+            return f"[LLM 调用错误: {e}]"
+        return "[LLM 调用返回空]"
+
+    def count_tokens(self, text: str) -> int:
+        # DeepSeek 的 Token 计算由 DailyReportGenerator 中的本地 Tokenizer 处理
+        # 这个方法在这里只是为了满足接口统一性，实际上不会被调用
+        raise NotImplementedError("DeepSeek token counting should be handled locally.")
+
+
+class LLMConnectorFactory:
+    """根据提供商名称创建相应的连接器实例。"""
+
+    @staticmethod
+    def create(provider_name: str, provider_config: Dict[str, Any]) -> BaseLLMConnector:
+        if provider_name == "gemini":
+            return GeminiConnector(provider_config)
+        elif provider_name == "deepseek":
+            return DeepSeekConnector(provider_config)
+        else:
+            raise ValueError(f"不支持的 LLM provider: {provider_name}")
 
 
 # --- 模块 1.1: 数据获取模块 ---
@@ -149,9 +226,12 @@ class DailyReportGenerator:
         self.llm_provider_name = cli_args.llm or self.config["llm_provider"]
         log_with_timestamp(f"🔧 LLM 提供商已确定: {self.llm_provider_name}")
         self.provider_config = self.config["llm_config"][self.llm_provider_name]
-        self.llm_connector = LLMConnector(
+
+        # *** 关键变更: 使用工厂模式创建连接器 ***
+        self.llm_connector = LLMConnectorFactory.create(
             provider_name=self.llm_provider_name, provider_config=self.provider_config
         )
+
         self.task_template = self._load_task_template(cli_args.task)
         if cli_args.temperature is not None:
             self.temperature = cli_args.temperature
@@ -177,7 +257,7 @@ class DailyReportGenerator:
         return templates[task_name]
 
     def _setup_tokenizers(self):
-        self.precise_tokenizer_type = "api"
+        self.precise_tokenizer = None
         self.rough_tokenizer = tiktoken.get_encoding("cl100k_base")
         log_with_timestamp("  - 粗算将使用: tiktoken")
         if self.llm_provider_name == "deepseek":
@@ -190,12 +270,11 @@ class DailyReportGenerator:
                     self.precise_tokenizer = transformers.AutoTokenizer.from_pretrained(
                         tokenizer_path, trust_remote_code=True
                     )
-                    self.precise_tokenizer_type = "local_exact"
                 except Exception as e:
                     log_with_timestamp(f"  - ❌ 加载 DeepSeek Tokenizer 失败: {e}。")
-            else:
-                log_with_timestamp(f"  - ⚠️ 未找到 DeepSeek Tokenizer，精算将不可用。")
-        log_with_timestamp(f"  - 精算方式已确定: {self.precise_tokenizer_type}")
+        log_with_timestamp(
+            f"  - 精算方式已确定: {'local_exact' if self.precise_tokenizer else 'api'}"
+        )
 
     def _clean_data(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not records:
@@ -238,11 +317,12 @@ class DailyReportGenerator:
         return cleaned_records
 
     def _estimate_precise_tokens(self, text: str) -> int:
-        if self.precise_tokenizer_type == "api":  # Gemini
-            return self.llm_connector.client.count_tokens(text).total_tokens
-        elif self.precise_tokenizer_type == "local_exact":  # DeepSeek
+        if self.llm_provider_name == "gemini":
+            return self.llm_connector.count_tokens(text)
+        elif self.llm_provider_name == "deepseek" and self.precise_tokenizer:
             return len(self.precise_tokenizer.encode(text))
-        return 0
+        # 如果没有精确方法，回退到粗算
+        return self._estimate_rough_tokens(text)
 
     def _estimate_rough_tokens(self, text: str) -> int:
         return len(self.rough_tokenizer.encode(text))
@@ -250,12 +330,7 @@ class DailyReportGenerator:
     def _chunk_data_efficiently(
         self, records: List[Dict[str, Any]], max_chunk_tokens: int
     ) -> List[str]:
-        """
-        *** 关键变更: 最终的“预计算+指针累加”分段算法 ***
-        """
         log_with_timestamp("⏳ 正在高效地对数据进行分段...")
-
-        # 1. 预计算阶段
         log_with_timestamp("  - 步骤1: 正在对所有记录进行Token粗算预计算...")
         records_with_rough_tokens = [
             (
@@ -267,22 +342,17 @@ class DailyReportGenerator:
             for record in records
         ]
         log_with_timestamp("  - ✅ 预计算完成。")
-
         chunks = []
         start_index = 0
         while start_index < len(records_with_rough_tokens):
-            # 2. 指针累加打包阶段
             current_rough_tokens = 0
             end_index = start_index
             while end_index < len(records_with_rough_tokens):
                 current_rough_tokens += records_with_rough_tokens[end_index][1]
                 if current_rough_tokens > max_chunk_tokens and end_index > start_index:
-                    # 粗算超限，回退一步，找到了一个粗略的块
                     current_rough_tokens -= records_with_rough_tokens[end_index][1]
                     break
                 end_index += 1
-
-            # 提取粗略块的记录
             current_chunk_records = [
                 rec for rec, token in records_with_rough_tokens[start_index:end_index]
             ]
@@ -292,14 +362,11 @@ class DailyReportGenerator:
                     for r in current_chunk_records
                 ]
             )
-
-            # 3. 精确修正阶段
             log_with_timestamp(
                 f"  - 粗算打包完成一个块 (记录 {start_index}-{end_index-1}，粗算 {current_rough_tokens})，开始精算..."
             )
             precise_tokens = self._estimate_precise_tokens(temp_chunk_text)
             log_with_timestamp(f"  - 精算结果: {precise_tokens} tokens。")
-
             while precise_tokens > max_chunk_tokens and len(current_chunk_records) > 1:
                 log_with_timestamp(
                     f"  - 精算后仍超限 (溢出 {precise_tokens - max_chunk_tokens} tokens)，开始动态移除..."
@@ -312,14 +379,11 @@ class DailyReportGenerator:
                     else 1
                 )
                 num_to_remove = max(1, num_to_remove)
-
                 log_with_timestamp(
                     f"  - 动态计算：预估需移除 {num_to_remove} 条记录..."
                 )
-
                 current_chunk_records = current_chunk_records[:-num_to_remove]
                 end_index -= num_to_remove
-
                 temp_chunk_text = "\n\n---\n\n".join(
                     [
                         f"Timestamp: {r['captured_at']}\n{r['text']}"
@@ -328,33 +392,62 @@ class DailyReportGenerator:
                 )
                 precise_tokens = self._estimate_precise_tokens(temp_chunk_text)
                 log_with_timestamp(f"  - 修正后精算结果: {precise_tokens} tokens。")
-
             chunks.append(temp_chunk_text)
             start_index = end_index
-
         log_with_timestamp(f"✅ 分段完成。数据被分为 {len(chunks)} 个段落。")
         return chunks
 
-    def run(self, start_time: datetime, end_time: datetime):
+    def _generate_final_report(
+        self,
+        llm_context: str,
+        run_output_dir: Path,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ):
+        log_with_timestamp("🖋️ 开始生成最终报告...")
+        final_prompt_template = self.task_template["final_report_prompt"]
+        final_prompt = final_prompt_template.format(all_summaries=llm_context)
+        final_report = self.llm_connector.generate(
+            user_prompt=final_prompt,
+            system_prompt=self.task_template.get("system_prompt"),
+            temperature=self.temperature,
+            attachment_data=attachment_data,
+            attachment_type=attachment_type,
+        )
+        report_path = run_output_dir / "final_report.md"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(final_report)
+        log_with_timestamp(f"\n🎉 成功！报告已保存至: {report_path}")
+
+    def run(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ):
+        run_output_dir = (
+            Path(self.config["output_path"])
+            / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{self.cli_args.task}_{self.llm_provider_name}"
+        )
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        log_with_timestamp(f"📂 本次运行会话目录已创建: {run_output_dir}")
         raw_records = self.data_fetcher.fetch_data(start_time, end_time)
         cleaned_records = self._clean_data(raw_records)
         if not cleaned_records:
             log_with_timestamp("ℹ️ 清洗后无有效数据，无法生成报告。")
             return
-
         log_with_timestamp("📊 正在使用精确方法计算总 Token 数，请稍候...")
         full_text = "\n\n---\n\n".join(
             [f"Timestamp: {r['captured_at']}\n{r['text']}" for r in cleaned_records]
         )
         total_tokens = self._estimate_precise_tokens(full_text)
         log_with_timestamp(f"📊 精确总 Token 数计算完成: {total_tokens}")
-
         llm_context = ""
         llm_context_window = self.provider_config["context_window"]
         effective_direct_summary_threshold = min(
             self.config["direct_summary_threshold"], llm_context_window
         )
-
         if total_tokens < effective_direct_summary_threshold:
             log_with_timestamp("📈 Token 总数小于阈值，直接生成最终报告。")
             llm_context = full_text
@@ -364,9 +457,10 @@ class DailyReportGenerator:
                 self.provider_config["context_window"] - self.config["token_headroom"]
             )
             log_with_timestamp(f"  - 每个分段最大 Token 上限: {max_chunk_tokens}")
-
             chunks = self._chunk_data_efficiently(cleaned_records, max_chunk_tokens)
-
+            summaries_dir = run_output_dir / "summaries"
+            summaries_dir.mkdir(exist_ok=True)
+            log_with_timestamp(f"  - 分段摘要将保存至: {summaries_dir}")
             chunk_prompt_template = self.task_template["chunk_summary_prompt"]
             system_prompt = self.task_template.get("system_prompt")
             summaries = []
@@ -378,32 +472,52 @@ class DailyReportGenerator:
                     temperature=self.temperature,
                 )
                 summaries.append(summary)
+                summary_filename = f"{i+1:02d}_summary.txt"
+                summary_path = summaries_dir / summary_filename
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    f.write(summary)
+                log_with_timestamp(f"  - ✅ 已保存摘要 {summary_filename}")
                 if i < len(chunks) - 1 and api_delay > 0:
                     log_with_timestamp(
                         f"⏸️ 检测到 {self.llm_provider_name} 需要延迟调用，暂停 {api_delay} 秒..."
                     )
                     time.sleep(api_delay)
-
             llm_context = "\n\n".join(summaries)
-
-        log_with_timestamp("🖋️ 开始生成最终报告...")
-        final_prompt_template = self.task_template["final_report_prompt"]
-        final_report = self.llm_connector.generate(
-            user_prompt=final_prompt_template.format(all_summaries=llm_context),
-            system_prompt=system_prompt,
-            temperature=self.temperature,
+        self._generate_final_report(
+            llm_context, run_output_dir, attachment_data, attachment_type
         )
 
-        output_dir = self.config["output_path"]
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        report_filename = (
-            f"{timestamp_str}_{self.cli_args.task}_{self.llm_provider_name}.md"
+    def run_from_summaries(
+        self,
+        summary_dir_path: Path,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ):
+        log_with_timestamp(f"🔄 进入二次处理模式，从文件夹加载摘要: {summary_dir_path}")
+        if not summary_dir_path.is_dir():
+            log_with_timestamp(f"❌ 错误: 提供的路径不是一个有效的文件夹。")
+            return
+        summary_files = sorted(summary_dir_path.glob("*.txt"))
+        if not summary_files:
+            log_with_timestamp(
+                f"❌ 错误: 在 {summary_dir_path} 中没有找到任何 .txt 摘要文件。"
+            )
+            return
+        log_with_timestamp(f"  - 找到 {len(summary_files)} 个摘要文件，正在读取...")
+        summaries = []
+        for file_path in summary_files:
+            with open(file_path, "r", encoding="utf-8") as f:
+                summaries.append(f.read())
+        llm_context = "\n\n".join(summaries)
+        run_output_dir = (
+            Path(self.config["output_path"])
+            / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{self.cli_args.task}_{self.llm_provider_name}_finetuned"
         )
-        report_path = os.path.join(output_dir, report_filename)
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(final_report)
-        log_with_timestamp(f"\n🎉 成功！报告已保存至: {report_path}")
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        log_with_timestamp(f"📂 本次二次处理会话目录已创建: {run_output_dir}")
+        self._generate_final_report(
+            llm_context, run_output_dir, attachment_data, attachment_type
+        )
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -427,13 +541,11 @@ if __name__ == "__main__":
         "--start_time",
         type=str,
         help="开始时间 (格式: YYYY-MM-DDTHH:MM:SS)，默认为24小时前",
-        default=(datetime.now() - timedelta(days=1)).isoformat(timespec="seconds"),
     )
     parser.add_argument(
         "--end_time",
         type=str,
         help="结束时间 (格式: YYYY-MM-DDTHH:MM:SS)，默认为当前时间",
-        default=datetime.now().isoformat(timespec="seconds"),
     )
     parser.add_argument(
         "--config", type=str, default="config.json", help="配置文件的路径"
@@ -454,6 +566,14 @@ if __name__ == "__main__":
         type=float,
         help="设置 LLM 的 Temperature。会覆盖配置文件中的设置。",
     )
+    parser.add_argument(
+        "--attachment", type=str, help="提供一个附件的路径 (可以是文本文件或图片)。"
+    )
+    parser.add_argument(
+        "--use_summaries_from",
+        type=str,
+        help="提供一个包含摘要文件的文件夹路径，跳过数据提取和分段摘要，直接生成最终报告。",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -465,12 +585,67 @@ if __name__ == "__main__":
             os.environ["HTTP_PROXY"] = proxy
             os.environ["HTTPS_PROXY"] = proxy
             log_with_timestamp(f"🔧 全局代理已为 Gemini 设置: {proxy}")
-    try:
-        start_dt, end_dt = datetime.fromisoformat(
-            args.start_time
-        ), datetime.fromisoformat(args.end_time)
-    except ValueError:
-        log_with_timestamp("错误: 时间格式不正确。请使用 'YYYY-MM-DDTHH:MM:SS' 格式。")
-        exit(1)
+    attachment_data = None
+    attachment_type = None
+    if args.attachment:
+        attachment_path = Path(args.attachment)
+        if not attachment_path.exists():
+            log_with_timestamp(f"❌ 错误: 附件文件未找到: {args.attachment}")
+            exit(1)
+        suffix = attachment_path.suffix.lower()
+        if suffix in [".txt", ".md", ".json", ".xml", ".py", ".js"]:
+            try:
+                with open(attachment_path, "r", encoding="utf-8") as f:
+                    attachment_data = f.read()
+                attachment_type = "text"
+                log_with_timestamp(f"📄 已成功加载文本附件: {args.attachment}")
+            except Exception as e:
+                log_with_timestamp(f"❌ 错误: 读取文本附件失败: {e}")
+                exit(1)
+        elif suffix in [".png", ".jpg", ".jpeg", ".webp"]:
+            try:
+                attachment_data = Image.open(attachment_path)
+                attachment_type = "image"
+                log_with_timestamp(f"🖼️ 已成功加载图片附件: {args.attachment}")
+            except Exception as e:
+                log_with_timestamp(f"❌ 错误: 读取图片附件失败: {e}")
+                exit(1)
+        else:
+            log_with_timestamp(
+                f"⚠️ 警告: 不支持的附件文件类型 '{suffix}'。附件将被忽略。"
+            )
+
     generator = DailyReportGenerator(config=config, cli_args=args)
-    generator.run(start_time=start_dt, end_time=end_dt)
+
+    if args.use_summaries_from:
+        summary_dir = Path(args.use_summaries_from)
+        generator.run_from_summaries(summary_dir, attachment_data, attachment_type)
+    else:
+        try:
+            if args.start_time:
+                start_dt_local = datetime.fromisoformat(args.start_time)
+            else:
+                start_dt_local = datetime.now() - timedelta(days=1)
+            if args.end_time:
+                end_dt_local = datetime.fromisoformat(args.end_time)
+            else:
+                end_dt_local = datetime.now()
+            start_dt_utc = start_dt_local.astimezone(timezone.utc)
+            end_dt_utc = end_dt_local.astimezone(timezone.utc)
+            log_with_timestamp(
+                f"查询时间范围 (本地): {start_dt_local.isoformat(timespec='seconds')} -> {end_dt_local.isoformat(timespec='seconds')}"
+            )
+            log_with_timestamp(
+                f"查询时间范围 (UTC): {start_dt_utc.isoformat(timespec='seconds')} -> {end_dt_utc.isoformat(timespec='seconds')}"
+            )
+        except ValueError:
+            log_with_timestamp(
+                "错误: 时间格式不正确。请使用 'YYYY-MM-DDTHH:MM:SS' 格式。"
+            )
+            exit(1)
+        generator.run(
+            start_time=start_dt_utc,
+            end_time=end_dt_utc,
+            attachment_data=attachment_data,
+            attachment_type=attachment_type,
+        )

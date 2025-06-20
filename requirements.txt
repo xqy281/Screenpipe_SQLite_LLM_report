@@ -5,3 +5,4 @@ numpy
 google-generativeai
 openai
 transformers
+Pillow

@@ -31,12 +31,9 @@ def log_with_timestamp(message: str):
     print(f"[{timestamp}] {message}")
 
 
-# *** 关键变更: 引入面向对象的 LLM 连接器架构 ***
-
-
+# --- 模块 1.6: LLM 接口模块 ---
 class BaseLLMConnector:
-    """所有 LLM 连接器的基类，定义了统一的接口。"""
-
+    # ... 此部分代码无变化 ...
     def __init__(self, provider_config: Dict[str, Any]):
         self.provider_config = provider_config
         self.model_name = provider_config.get("model_name")
@@ -63,8 +60,7 @@ class BaseLLMConnector:
 
 
 class GeminiConnector(BaseLLMConnector):
-    """处理 Google Gemini 模型的连接器。"""
-
+    # ... 此部分代码无变化 ...
     def _initialize_client(self):
         genai.configure(api_key=self.provider_config["api_key"])
         return genai.GenerativeModel(self.model_name)
@@ -105,8 +101,7 @@ class GeminiConnector(BaseLLMConnector):
 
 
 class DeepSeekConnector(BaseLLMConnector):
-    """处理 DeepSeek 和其他 OpenAI 兼容 API 的连接器。"""
-
+    # ... 此部分代码无变化 ...
     def _initialize_client(self):
         return OpenAI(
             api_key=self.provider_config["api_key"],
@@ -122,8 +117,6 @@ class DeepSeekConnector(BaseLLMConnector):
         attachment_type: Optional[str] = None,
     ) -> str:
         log_with_timestamp(f"🚀 发起 DeepSeek API 调用 (Temperature: {temperature})...")
-
-        # 当前的保护性措施
         if attachment_type == "image":
             log_with_timestamp(
                 "❌ 错误: DeepSeek 的 OpenAI 兼容 API 当前不支持直接的图像输入。"
@@ -132,7 +125,6 @@ class DeepSeekConnector(BaseLLMConnector):
                 "   (模型本身具备多模态能力，但需要等待官方更新其公共API以支持此功能)"
             )
             return "[错误: 此模型 API 不支持图像输入]"
-
         try:
             messages = []
             if system_prompt:
@@ -150,14 +142,11 @@ class DeepSeekConnector(BaseLLMConnector):
         return "[LLM 调用返回空]"
 
     def count_tokens(self, text: str) -> int:
-        # DeepSeek 的 Token 计算由 DailyReportGenerator 中的本地 Tokenizer 处理
-        # 这个方法在这里只是为了满足接口统一性，实际上不会被调用
         raise NotImplementedError("DeepSeek token counting should be handled locally.")
 
 
 class LLMConnectorFactory:
-    """根据提供商名称创建相应的连接器实例。"""
-
+    # ... 此部分代码无变化 ...
     @staticmethod
     def create(provider_name: str, provider_config: Dict[str, Any]) -> BaseLLMConnector:
         if provider_name == "gemini":
@@ -219,6 +208,7 @@ class DataFetcher:
 
 # --- 核心应用类 ---
 class DailyReportGenerator:
+    # ... __init__ 和其他辅助方法无变化 ...
     def __init__(self, config: Dict[str, Any], cli_args: argparse.Namespace):
         self.config = config
         self.data_fetcher = DataFetcher()
@@ -226,12 +216,9 @@ class DailyReportGenerator:
         self.llm_provider_name = cli_args.llm or self.config["llm_provider"]
         log_with_timestamp(f"🔧 LLM 提供商已确定: {self.llm_provider_name}")
         self.provider_config = self.config["llm_config"][self.llm_provider_name]
-
-        # *** 关键变更: 使用工厂模式创建连接器 ***
         self.llm_connector = LLMConnectorFactory.create(
             provider_name=self.llm_provider_name, provider_config=self.provider_config
         )
-
         self.task_template = self._load_task_template(cli_args.task)
         if cli_args.temperature is not None:
             self.temperature = cli_args.temperature
@@ -272,6 +259,8 @@ class DailyReportGenerator:
                     )
                 except Exception as e:
                     log_with_timestamp(f"  - ❌ 加载 DeepSeek Tokenizer 失败: {e}。")
+            else:
+                log_with_timestamp(f"  - ⚠️ 未找到 DeepSeek Tokenizer，精算将不可用。")
         log_with_timestamp(
             f"  - 精算方式已确定: {'local_exact' if self.precise_tokenizer else 'api'}"
         )
@@ -321,7 +310,6 @@ class DailyReportGenerator:
             return self.llm_connector.count_tokens(text)
         elif self.llm_provider_name == "deepseek" and self.precise_tokenizer:
             return len(self.precise_tokenizer.encode(text))
-        # 如果没有精确方法，回退到粗算
         return self._estimate_rough_tokens(text)
 
     def _estimate_rough_tokens(self, text: str) -> int:
@@ -419,20 +407,27 @@ class DailyReportGenerator:
             f.write(final_report)
         log_with_timestamp(f"\n🎉 成功！报告已保存至: {report_path}")
 
+    # *** 关键变更: run 方法签名更新，接收本地时间 ***
     def run(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time_utc: datetime,
+        end_time_utc: datetime,
+        start_time_local: datetime,
+        end_time_local: datetime,
         attachment_data: Optional[Any] = None,
         attachment_type: Optional[str] = None,
     ):
-        run_output_dir = (
-            Path(self.config["output_path"])
-            / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{self.cli_args.task}_{self.llm_provider_name}"
-        )
+        # *** 关键变更: 使用本地时间生成会话文件夹名称 ***
+        time_range_str = f"{start_time_local.strftime('%Y%m%d_%H%M')}-{end_time_local.strftime('%Y%m%d_%H%M')}"
+        current_timestamp_str = datetime.now().strftime("%y-%m-%d %H_%M_%S")
+        session_name = f"{time_range_str}_{self.cli_args.task}_{self.llm_provider_name}_{current_timestamp_str}"
+
+        run_output_dir = Path(self.config["output_path"]) / session_name
         run_output_dir.mkdir(parents=True, exist_ok=True)
         log_with_timestamp(f"📂 本次运行会话目录已创建: {run_output_dir}")
-        raw_records = self.data_fetcher.fetch_data(start_time, end_time)
+
+        # *** 关键变更: 使用 UTC 时间进行数据获取 ***
+        raw_records = self.data_fetcher.fetch_data(start_time_utc, end_time_utc)
         cleaned_records = self._clean_data(raw_records)
         if not cleaned_records:
             log_with_timestamp("ℹ️ 清洗后无有效数据，无法生成报告。")
@@ -509,12 +504,16 @@ class DailyReportGenerator:
             with open(file_path, "r", encoding="utf-8") as f:
                 summaries.append(f.read())
         llm_context = "\n\n".join(summaries)
-        run_output_dir = (
-            Path(self.config["output_path"])
-            / f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{self.cli_args.task}_{self.llm_provider_name}_finetuned"
-        )
+
+        # *** 关键变更: 生成二次处理的会话文件夹名称 ***
+        source_dir_name = summary_dir_path.name
+        current_timestamp_str = datetime.now().strftime("%y-%m-%d %H_%M_%S")
+        session_name = f"from_{source_dir_name}_{self.cli_args.task}_{self.llm_provider_name}_{current_timestamp_str}"
+
+        run_output_dir = Path(self.config["output_path"]) / session_name
         run_output_dir.mkdir(parents=True, exist_ok=True)
         log_with_timestamp(f"📂 本次二次处理会话目录已创建: {run_output_dir}")
+
         self._generate_final_report(
             llm_context, run_output_dir, attachment_data, attachment_type
         )
@@ -585,6 +584,7 @@ if __name__ == "__main__":
             os.environ["HTTP_PROXY"] = proxy
             os.environ["HTTPS_PROXY"] = proxy
             log_with_timestamp(f"🔧 全局代理已为 Gemini 设置: {proxy}")
+
     attachment_data = None
     attachment_type = None
     if args.attachment:
@@ -643,9 +643,13 @@ if __name__ == "__main__":
                 "错误: 时间格式不正确。请使用 'YYYY-MM-DDTHH:MM:SS' 格式。"
             )
             exit(1)
+
+        # *** 关键变更: 将本地和UTC时间都传递给 run 方法 ***
         generator.run(
-            start_time=start_dt_utc,
-            end_time=end_dt_utc,
+            start_time_utc=start_dt_utc,
+            end_time_utc=end_dt_utc,
+            start_time_local=start_dt_local,
+            end_time_local=end_dt_local,
             attachment_data=attachment_data,
             attachment_type=attachment_type,
         )

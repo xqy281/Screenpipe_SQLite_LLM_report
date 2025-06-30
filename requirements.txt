@@ -2,7 +2,7 @@
 sentence-transformers
 tiktoken
 numpy
-google-generativeai
+google-genai
 openai
 transformers
 Pillow

@@ -3,16 +3,17 @@
   "llm_config": {
     "gemini": {
       "api_key": "YOUR_GEMINI_API_KEY_HERE",
-      "model_name": "gemini-1.5-flash",
+      "model_name": "gemini-2.5-flash-lite-preview-06-17",
       "context_window": 1000000,
       "proxy": "http://127.0.0.1:10808",
       "temperature": 0.5,
-      "api_call_delay_seconds": 10
+      "api_call_delay_seconds": 10,
+       "enable_thinking_mode": true
     },
     "deepseek": {
       "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
       "base_url": "https://api.deepseek.com/v1",
-      "model_name": "deepseek-chat",
+      "model_name": "deepseek-reasoner",
       "context_window": 65536,
       "tokenizer_path": "./deepseek_v2_tokenizer",
       "temperature": 0.7,
@@ -31,12 +32,36 @@
       "system_prompt": "你是一位优秀的技术文档工程师，精通编写清晰易懂的操作教程。你的任务是分析用户提供的屏幕操作记录（OCR文本），并将其整理成一份按步骤排列、逻辑清晰的操作指南。",
       "chunk_summary_prompt": "请对以下OCR操作记录进行初步梳理，按时间顺序整理出核心的操作步骤和关键信息：\n\n{chunk_text}",
       "final_report_prompt": "请基于以下所有操作记录摘要，生成一份完整的操作教程。教程应有一个明确的标题，并以'步骤一'、'步骤二'等形式列出所有操作。请确保描述清晰、准确，适合初学者阅读：\n\n{all_summaries}"
+    },
+    "git_release_sop_generator": {
+      "description": "根据Git操作记录和业务流程图，生成一份代码仓库释放的标准作业程序(SOP)。",
+      "system_prompt": "你是一位资深的DevOps专家和Git大师，你的任务是分析用户提供的Git命令行操作记录（OCR文本）和一张描述业务逻辑的流程图。请将这些信息整合成一份清晰、严谨、可复现的标准作业程序（SOP）。",
+      "chunk_summary_prompt": "请对以下Git操作记录进行初步分析，按时间顺序整理出各工作目录下完整的git 命令操作以及相关的git批量执行脚本，涉及的仓库、分支，以及可能的操作意图：\n\n{chunk_text}",
+      "final_report_prompt": "请结合附加的业务流程图和以下的操作记录摘要，生成一份完整的《代码仓库释放标准作业程序 (SOP)》。报告应包含【背景目标】、【准备工作】、【详细步骤】和【注意事项】等部分。在详细步骤中，请将具体的操作命令和流程图中的逻辑结合起来解释，确保SOP与流程图完全对应。"
+    },
+    "sean_report": {
+      "description": "根据OCR记录生成一份专业的工作日报。",
+      "system_prompt": "你是一位专业的分析师和日志摘要专家，你的任务是分析用户在`<ocr_data>`标签内提供的屏幕操作记录，并从中提炼出当天的工作重点及其内容并标记对应的OCR时间，生成一份结构清晰、重点突出的工作日报。",
+      "chunk_summary_prompt": "请对以下`<ocr_data>`标签内的OCR记录区块进行初步摘要形成，提炼出关键的操作、意图和内容信息，需要关注的场景内容：git commit、Visual Studio Code、问题及资料的调研分析、信息及报告的输出，我的列举可能有遗漏，如果你在分析的过程中发现了有价值的场景内容可以追加进来，为最终生成日报做准备：\n\n{chunk_text}",
+      "final_report_prompt": "请基于以下所有分段摘要信息，以日报形式输出我今天的工作内容。报告应包含【主要任务】、【完成情况】和【遇到的问题】、【有效价值输出】等部分。格式清晰，语言专业：\n\n{all_summaries}"
+    },
+    "turn_text": {
+      "description": "把OCR记录精简为文本信息。",
+      "system_prompt": "你是一位专业的分析师，你的任务是分析用户提供的屏幕操作记录（OCR文本），并从中提炼出围绕着工作展开的行为记录，提炼出的数据需要标记对应的OCR时间，生成一份结构清晰、突出重点的摘要汇总",
+      "chunk_summary_prompt": "请对以下OCR操作记录进行初步信息提炼，提炼出关键的操作、意图和信息，忽略所有无关的背景信息和噪音，需要关注的行为记录：git 操作、code debug、问题及资料的调研分析、信息及报告的输出，我的关注行为例举可能有遗漏的，如果你在分析的过程中发现了有价值的行为可以追加进来，为最终生成摘要汇总做准备：\n\n{chunk_text}",
+      "final_report_prompt": "请基于以下所有分段摘要信息，形成摘要汇总。汇总应保持时间脉络清晰、行为记录完整、展现关键具体细节。格式清晰，语言专业：\n\n{all_summaries}"
+    },
+    "ProTurn_text": {
+      "description": "从OCR记录中智能过滤并结构化输出关键的工作行为。",
+      "system_prompt": "你是一个高效的日志过滤器。你的唯一任务是分析输入的OCR文本流，并只提取与“关键工作行为”相关的条目。对于任何不属于关键行为的记录，你必须彻底忽略，不产生任何输出。",
+      "chunk_summary_prompt": "逐条分析以下OCR记录。只当记录属于【关键工作行为】时，才将其转换为指定的YAML格式输出。否则，必须忽略该条记录。\n\n**关键工作行为列表**:\n- **代码版本控制**: 任何 `git` 相关操作 (commit, push, pull, branch, etc.)。\n- **编译与构建**: 任何 `make`, `cmake`, `npm install`, `docker build` 等操作。\n- **代码与文本编辑**: 使用 `vim`, `nano`, `vscode` 等编辑器打开或修改文件。\n- **问题排查**: 使用 `grep`, `find`, `curl`, `ping` 等命令进行调试。\n- **脚本与程序执行**: 直接执行脚本 (如 `./run.sh`) 或程序。\n- **环境配置**: 修改 shell 配置文件 (`.bashrc`, `.zshrc`) 或安装软件 (`apt`, `nvm`)。\n\n**输出格式要求**:\n```yaml\n- timestamp: \"HH:MM:SS\"\n  action: \"对关键行为的简明描述\"\n  content: |-\n    【该条记录的完整或核心文本内容】\n```\n\n**示例**:\n*输入:*\nTimestamp: 10:30:05\ncd /home/project\n---\nTimestamp: 10:30:10\ngit status\nOn branch main\n---\nTimestamp: 10:30:15\nls -l\n\n*你的输出必须是:*\n```yaml\n- timestamp: \"10:30:10\"\n  action: \"执行 git status 命令\"\n  content: |-\n    git status\n    On branch main\n```\n\n**待处理的OCR文本**:\n\n{chunk_text}",
+      "final_report_prompt": "根据以下 YAML 格式的分段摘要，生成一份最终的、结构化的工作内容报告。报告应以【关键工作记录】为主体，清晰地展示每一个关键行为及其产出的具体内容。\n\n**输出要求**:\n- 使用二级标题 `## [HH:MM:SS] 关键行为描述` 来组织每一个条目。\n- 在二级标题下，如果存在具体内容，则使用 Markdown 代码块（```）将其完整展示。\n- 整体风格要求专业、清晰，易于阅读和回顾。\n\n**待合并的摘要**:\n\n{all_summaries}"
     }
   },
   "high_similarity_threshold": 0.95,
-  "min_diff_chars": 50,
+  "min_diff_chars": 48,
   "direct_summary_threshold": 800000,
-  "token_headroom": 4096,
+  "token_headroom": 16384,
   "tokenizer_safety_margin": 0.9,
   "output_path": "./reports"
 }

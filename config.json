@@ -2,13 +2,17 @@
   "llm_provider": "gemini",
   "llm_config": {
     "gemini": {
-      "api_key": "YOUR_GEMINI_API_KEY_HERE",
-      "model_name": "gemini-2.5-flash-lite-preview-06-17",
+      "api_key": "YOUR_GEMINI_API_KEY_HER",
+      "model_name": "gemini-1.5-flash-8b-latest",
       "context_window": 1000000,
       "proxy": "http://127.0.0.1:10808",
       "temperature": 0.5,
-      "api_call_delay_seconds": 10,
-       "enable_thinking_mode": true
+       "enable_thinking_mode": false,
+        "rate_limiting": {
+        "rpm": 4000,
+        "tpm": 4000000,
+        "concurrency": 50
+      }
     },
     "deepseek": {
       "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
@@ -16,8 +20,7 @@
       "model_name": "deepseek-reasoner",
       "context_window": 65536,
       "tokenizer_path": "./deepseek_v2_tokenizer",
-      "temperature": 0.7,
-      "api_call_delay_seconds": 0
+      "temperature": 0.7
     }
   },
   "prompt_templates": {
@@ -40,10 +43,10 @@
       "final_report_prompt": "请结合附加的业务流程图和以下的操作记录摘要，生成一份完整的《代码仓库释放标准作业程序 (SOP)》。报告应包含【背景目标】、【准备工作】、【详细步骤】和【注意事项】等部分。在详细步骤中，请将具体的操作命令和流程图中的逻辑结合起来解释，确保SOP与流程图完全对应。"
     },
     "sean_report": {
-      "description": "根据OCR记录生成一份专业的工作日报。",
-      "system_prompt": "你是一位专业的分析师和日志摘要专家，你的任务是分析用户在`<ocr_data>`标签内提供的屏幕操作记录，并从中提炼出当天的工作重点及其内容并标记对应的OCR时间，生成一份结构清晰、重点突出的工作日报。",
-      "chunk_summary_prompt": "请对以下`<ocr_data>`标签内的OCR记录区块进行初步摘要形成，提炼出关键的操作、意图和内容信息，需要关注的场景内容：git commit、Visual Studio Code、问题及资料的调研分析、信息及报告的输出，我的列举可能有遗漏，如果你在分析的过程中发现了有价值的场景内容可以追加进来，为最终生成日报做准备：\n\n{chunk_text}",
-      "final_report_prompt": "请基于以下所有分段摘要信息，以日报形式输出我今天的工作内容。报告应包含【主要任务】、【完成情况】和【遇到的问题】、【有效价值输出】等部分。格式清晰，语言专业：\n\n{all_summaries}"
+     "description": "根据LLM智能提纯后的活动摘要，生成一份结构化、叙事性的高级工程师工作日报。",
+      "system_prompt": "你是一位资深的工程经理或团队主管，精通嵌入式系统开发的全流程。你的任务是审查由AI助手（LLM智能提纯流程）预处理过的工作日志摘要，并将其整合成一份具有高度可读性、逻辑清晰、能体现高级工程师工作价值的专业日报。你需要超越简单的罗列，去发现活动之间的内在联系，构建出一天工作的完整叙事链条。",
+      "chunk_summary_prompt": "此提示词在'LLM智能提纯'流程中不被使用。实际的摘要生成由`llm_refinement_config`中的分类和总结提示词驱动。此字段仅为保持任务模板结构完整性而保留。",
+      "final_report_prompt": "请基于以下由AI助手提纯并按时间顺序排列的【工作活动摘要】，生成一份详尽、专业且结构清晰的《高级工程师工作日报》。\n\n报告必须严格遵循以下结构，并对每一部分进行深入分析和阐述：\n\n# [日期] 高级工程师工作日报\n\n## 一、工作简报 (Executive Summary)\n请首先对全天的工作进行一个高度概括的总结，点明今天的主线任务、关键进展以及最终状态。\n\n## 二、详细工作流 (Detailed Workflow)\n按时间顺序，将各个活动块整合成一个连贯的工作流叙事。请重点关注活动类型的切换，并用简洁的语言描述每个阶段的核心内容与目的。例如，从“编码”切换到“编译”，再到“调试”，清晰地展现“发现问题 -> 定位问题 -> 解决问题”的完整闭环。\n\n## 三、关键产出与交付 (Key Outputs & Deliverables)\n从工作流中提炼出今天产生的具体、可交付的成果。例如：\n- **代码提交(Commits):** 总结 `VersionControl` 活动块，列出关键的commit ID和变更摘要。\n- **固件/软件包(Builds):** 总结 `BuildAndCompile` 活动块，记录成功编译的版本号或包名。\n- **问题解决(Bugs Fixed):** 结合 `DeploymentAndDebugging` 和 `EmbeddedCoding` 活动，明确指出今天定位并修复了哪些具体问题。\n\n## 四、遇到的问题与对策 (Problems & Countermeasures)\n深入分析工作流中遇到的挑战，特别是：\n- **编译失败(Build Failures):** 详细记录关键的编译错误信息，以及最终是如何解决的。\n- **调试瓶颈(Debugging Blocks):** 描述在调试过程中遇到的难点，以及是如何通过查阅资料 (`ResearchAndAI`)、与AI讨论或进行硬件分析 (`HardwareAndRF`) 来突破的。\n\n## 五、思考与展望 (Reflections & Outlook)\n基于今天的工作，提出任何需要后续跟进的事项、潜在的风险或下一步的详细计划。\n\n--------------------\n【工作活动摘要】:\n{all_summaries}"
     },
     "turn_text": {
       "description": "把OCR记录精简为文本信息。",
@@ -56,6 +59,26 @@
       "system_prompt": "你是一个高效的日志过滤器。你的唯一任务是分析输入的OCR文本流，并只提取与“关键工作行为”相关的条目。对于任何不属于关键行为的记录，你必须彻底忽略，不产生任何输出。",
       "chunk_summary_prompt": "逐条分析以下OCR记录。只当记录属于【关键工作行为】时，才将其转换为指定的YAML格式输出。否则，必须忽略该条记录。\n\n**关键工作行为列表**:\n- **代码版本控制**: 任何 `git` 相关操作 (commit, push, pull, branch, etc.)。\n- **编译与构建**: 任何 `make`, `cmake`, `npm install`, `docker build` 等操作。\n- **代码与文本编辑**: 使用 `vim`, `nano`, `vscode` 等编辑器打开或修改文件。\n- **问题排查**: 使用 `grep`, `find`, `curl`, `ping` 等命令进行调试。\n- **脚本与程序执行**: 直接执行脚本 (如 `./run.sh`) 或程序。\n- **环境配置**: 修改 shell 配置文件 (`.bashrc`, `.zshrc`) 或安装软件 (`apt`, `nvm`)。\n\n**输出格式要求**:\n```yaml\n- timestamp: \"HH:MM:SS\"\n  action: \"对关键行为的简明描述\"\n  content: |-\n    【该条记录的完整或核心文本内容】\n```\n\n**示例**:\n*输入:*\nTimestamp: 10:30:05\ncd /home/project\n---\nTimestamp: 10:30:10\ngit status\nOn branch main\n---\nTimestamp: 10:30:15\nls -l\n\n*你的输出必须是:*\n```yaml\n- timestamp: \"10:30:10\"\n  action: \"执行 git status 命令\"\n  content: |-\n    git status\n    On branch main\n```\n\n**待处理的OCR文本**:\n\n{chunk_text}",
       "final_report_prompt": "根据以下 YAML 格式的分段摘要，生成一份最终的、结构化的工作内容报告。报告应以【关键工作记录】为主体，清晰地展示每一个关键行为及其产出的具体内容。\n\n**输出要求**:\n- 使用二级标题 `## [HH:MM:SS] 关键行为描述` 来组织每一个条目。\n- 在二级标题下，如果存在具体内容，则使用 Markdown 代码块（```）将其完整展示。\n- 整体风格要求专业、清晰，易于阅读和回顾。\n\n**待合并的摘要**:\n\n{all_summaries}"
+    },
+    "sean_report_standard_flow": {
+      "description": "基于'标准分段摘要流程'的原始摘要，生成一份专业的工作日报，用于对比报告质量。",
+      "system_prompt": "你是一位顶级的日志分析专家和报告生成大师。你的任务是接收一系列从屏幕录像中提取的、按时间顺序排列的原始工作摘要。这些摘要可能内容零散、有重复。你的核心能力是从这些看似混乱的信息中，精准地识别出关键的工作活动（如编码、编译、调试、版本控制等），然后将它们重新组织、提炼，并最终构建成一份逻辑清晰、结构专业的高级工程师日报。",
+      "chunk_summary_prompt": "请对以下OCR操作记录进行初步总结。请重点关注并提炼出以下几类关键行为：1. Git操作（commit, push等）。 2. VSCode中的代码编辑活动。 3. 编译或构建命令（make, npm等）及其结果（成功或失败）。 4. 任何形式的调试或问题排查。 5. 在浏览器中进行的技术资料查询。请用简洁的语言描述这些行为及其上下文：\n\n{chunk_text}",
+      "final_report_prompt": "你收到的是一系列按时间顺序排列的【原始工作摘要】。你的任务是扮演一个智能分析引擎，先对这些摘要进行深度分析和结构化，然后再生成一份详尽、专业且结构清晰的《高级工程师工作日报》。\n\n报告必须严格遵循以下结构，并对每一部分进行深入分析和阐述：\n\n# [日期] 高级工程师工作日报\n\n## 一、工作简报 (Executive Summary)\n请通读所有摘要后，对全天的工作进行一个高度概括的总结，点明今天的主线任务、关键进展以及最终状态。\n\n## 二、详细工作流 (Detailed Workflow)\n请仔细梳理所有摘要，识别出工作焦点的切换。例如，当你发现摘要中提到“make”命令失败，紧接着又提到“打开VSCode修改代码”或“Google搜索错误信息”时，这就是一个关键的流程节点。请将这些节点串联起来，形成一个连贯的工作流叙事。\n\n## 三、关键产出与交付 (Key Outputs & Deliverables)\n在所有摘要中，主动搜索并提炼出今天产生的具体、可交付的成果。你需要像侦探一样寻找线索：\n- **代码提交(Commits):** 寻找任何提及 `git commit` 的摘要，并提取其变更信息。\n- **固件/软件包(Builds):** 寻找提及 `build successful` 或类似信息的摘要，并记录相关的版本或包名。\n- **问题解决(Bugs Fixed):** 寻找描述“问题-分析-解决”过程的摘要链条，并明确指出今天定位并修复了哪些具体问题。\n\n## 四、遇到的问题与对策 (Problems & Countermeasures)\n在所有摘要中，主动搜索并提炼出工作流中遇到的挑战：\n- **编译失败(Build Failures):** 寻找提及 `error:` 或 `build failed` 的摘要，并记录关键的错误信息和后续的解决动作。\n- **调试瓶颈(Debugging Blocks):** 寻找描述“尝试”、“失败”、“搜索”、“询问AI”等行为的摘要，并总结遇到的技术难点和最终的突破方法。\n\n## 五、思考与展望 (Reflections & Outlook)\n基于对全天工作的分析，提出任何需要后续跟进的事项、潜在的风险或下一步的详细计划。\n\n--------------------\n【原始工作摘要】:\n{all_summaries}"
+    }
+  },
+   "llm_refinement_config": {
+    "classification_prompt": "你是一个专家系统，深度理解一位高级嵌入式系统工程师的工作流程。你的任务是分析以下JSON数组中的每一条日志记录，并为其进行精确分类。JSON数组中的每个对象都有一个唯一的'frame_id'。\n\n### 分类规则 (请仔细阅读并严格遵守):\n\n1.  **'EmbeddedCoding'**: 识别在VSCode等IDE中进行实际代码编写或编辑的活动。\n    - **关键词**: `import`, `define`, `function`, `if (`, `for (`, `while (`, `const`, `let`, `require`, `.c`, `.h`, `.js`, `.vue`, `.lua`, `LuaHelper`, 以及VSCode右下角显示的语言模式（如`JavaScript`, `C`, `Makefile`）。\n\n2.  **'BuildAndCompile'**: 识别执行编译或构建脚本的活动。\n    - **关键词**: `make`, `npm run build`, `gcc`, `clang`, `compiling`, `linking`, `error:`, `warning:`, `build successful`, `build failed`。\n\n3.  **'DeploymentAndDebugging'**: 识别将软件部署到目标设备或在设备上直接调试的活动。\n    - **关键词**: `scp`, `opkg install`, `opkg remove`, `ssh root@`, `/tmp/`, `gdb`, 以及在SSH会话中执行的脚本或命令。\n\n4.  **'FirmwareValidation'**: 识别对完整固件进行验证的活动，特别是通过串口。\n    - **关键词**: `MobaXterm`, `serial`, `COM[0-9]`, `ttyUSB[0-9]`, `booting kernel`, `rebooting system`, `watchdog`, `kernel panic`。\n\n5.  **'VersionControl'**: 识别所有Git相关操作。\n    - **关键词**: `git status`, `git add`, `git commit`, `git push`, `git pull`, `git merge`, `gitk`, `submodule`, `subtree`, `branch`, `merging`。\n\n6.  **'APIDebugging'**: 识别对Web后端接口的调试活动。\n    - **关键词**: `F12`, `DevTools`, `Postman`, `network`, `status: 200`, `status: 404`, `GET /api/`, `POST /api/`。\n\n7.  **'HardwareAndRF'**: 识别硬件电路或射频相关的专业工作。\n    - **关键词**: `DC-DC`, `voltage`, `current`, `register`, `WiFi`, `power`, `EVM`, `MCS`, `dBm`, `spectrum`, `non-signaling`。\n\n8.  **'ResearchAndAI'**: 识别查找资料或与AI交互的活动。\n    - **关键词**: `Google`, `Stack Overflow`, `CSDN`, `GitHub`, `DeepSeek`, `Gemini`, `AI Studio`, `YouTube`, `抖音`。\n\n9.  **'Noise/UI'**: 识别无具体操作意图的UI界面元素或无法分类的文本。\n    - **示例**: 仅显示文件浏览器、VSCode的`Git Graph`或`Makefile Tools`插件界面、窗口标题栏、无意义的OCR识别错误。\n\n### 输出格式和要求 (必须严格遵守):\n\n- **只返回一个JSON对象**，不要返回任何其他文字、解释、注释或markdown代码块。\n- JSON对象的`key`必须是原始数据中的`frame_id` (字符串类型)。\n- JSON对象的`value`必须是上述分类列表中的一个字符串。\n- **示例**: `{{\"12345\": \"EmbeddedCoding\", \"12346\": \"VersionControl\", \"12347\": \"BuildAndCompile\"}}`\n\n### 输入数据:\n{json_data}",
+    "summarization_prompts": {
+      "EmbeddedCoding": "分析以下在VSCode中的编码活动，用一句话总结。关键信息：主要编辑了哪个文件或模块？本次编码的核心目标是什么？\n日志: {data}\n总结:",
+      "BuildAndCompile": "分析以下编译活动，用一句话总结。关键信息：是编译单个package还是整编固件？编译是否成功？如果失败，关键的错误信息是什么？\n日志: {data}\n总结:",
+      "DeploymentAndDebugging": "分析以下在CPE上的部署和调试活动，用一句话总结。关键信息：部署了什么文件（.ipk或脚本）到设备？在SSH后台调试的核心目的是什么？\n日志: {data}\n总结:",
+      "FirmwareValidation": "分析以下固件验证活动，用一句话总结。关键信息：主要在验证固件的哪个阶段（如启动、长稳）？通过串口日志发现了什么关键问题？\n日志: {data}\n总结:",
+      "VersionControl": "分析以下Git操作，用一句话总结。关键信息：执行了什么核心操作（如commit、复杂合并、submodule/subtree同步）？根据提交信息，这次变更的目的是什么？\n日志: {data}\n总结:",
+      "APIDebugging": "分析以下API调试活动，用一句话总结。关键信息：主要测试了哪个接口？通过F12或Postman得出了什么关键结论？\n日志: {data}\n总结:",
+      "HardwareAndRF": "分析以下硬件或射频相关工作，用一句话总结。关键信息：是在进行电路计算、WiFi功率校准还是查看仪表指标？核心操作或结果是什么？\n日志: {data}\n总结:",
+      "ResearchAndAI": "分析以下研究或与AI的交互，用一句话总结。关键信息：主要在研究或询问什么技术问题？目的是寻找解决方案还是获取资讯？\n日志: {data}\n总结:",
+      "default": "请用一句话总结以下活动：\n{data}"
     }
   },
   "high_similarity_threshold": 0.95,

@@ -7,27 +7,27 @@ import sqlite3
 import platform
 import time
 import math
+import threading
+import random
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
+import concurrent.futures
 
 # --- 动态导入检查 ---
 try:
     import tiktoken
     from sentence_transformers import SentenceTransformer, util
-
-    # *** 关键变更: 导入新的 google-genai 库 ***
     from google import genai
-    from google.genai import types
+    from google.genai import types, errors as google_genai_errors
     from openai import OpenAI
     import transformers
     from PIL import Image
 except ImportError as e:
     print(f"依赖库导入失败: {e}")
-    print(
-        "请确保已卸载旧的 'google-generativeai' 并通过 'pip install google-genai' 安装了新库。"
-    )
-    print("同时请确认 'requirements.txt' 中的其他依赖已正确安装。")
+    print("请确保已通过 'pip install -r requirements.txt' 安装了所有依赖。")
+    print("特别是，请确认您安装的是 'google-genai' 而不是 'google-generativeai'。")
     exit(1)
 
 
@@ -35,6 +35,72 @@ except ImportError as e:
 def log_with_timestamp(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
+
+# [FINAL IMPLEMENTATION] 全局速率与并发控制中心
+class RateControlManager:
+    def __init__(self, rpm_limit: int, tpm_limit: int, concurrency_limit: int):
+        self.rpm_limit = rpm_limit if rpm_limit > 0 else float('inf')
+        self.tpm_limit = tpm_limit if tpm_limit > 0 else float('inf')
+        
+        self.request_timestamps = deque()
+        self.token_usage = deque()
+        self.cooldown_until = time.monotonic()
+        
+        self.lock = threading.Lock()
+        self.semaphore = threading.Semaphore(concurrency_limit)
+        
+        log_with_timestamp(f"✅ 全局速率控制中心已初始化: RPM={self.rpm_limit}, TPM={self.tpm_limit}, Concurrency={concurrency_limit}")
+
+    def _prune(self):
+        now = time.monotonic()
+        one_minute_ago = now - 60
+        while self.request_timestamps and self.request_timestamps[0] < one_minute_ago:
+            self.request_timestamps.popleft()
+        while self.token_usage and self.token_usage[0][0] < one_minute_ago:
+            self.token_usage.popleft()
+
+    def acquire(self, tokens_to_send: int):
+        self.semaphore.acquire()
+        try:
+            while True:
+                with self.lock:
+                    now = time.monotonic()
+                    
+                    if now < self.cooldown_until:
+                        sleep_time = self.cooldown_until - now
+                    else:
+                        sleep_time = 0
+
+                    if sleep_time > 0:
+                        pass
+                    else:
+                        self._prune()
+                        current_rpm = len(self.request_timestamps)
+                        current_tpm = sum(count for _, count in self.token_usage)
+                        
+                        if current_rpm < self.rpm_limit and (current_tpm + tokens_to_send) <= self.tpm_limit:
+                            return
+                
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    time.sleep(0.1) 
+        except Exception:
+            self.semaphore.release()
+            raise
+
+    def release(self, tokens_sent: int):
+        with self.lock:
+            now = time.monotonic()
+            self.request_timestamps.append(now)
+            self.token_usage.append((now, tokens_sent))
+        self.semaphore.release()
+
+    def trigger_cooldown(self, delay: float):
+        with self.lock:
+            cooldown_end_time = time.monotonic() + delay
+            self.cooldown_until = max(self.cooldown_until, cooldown_end_time)
+            log_with_timestamp(f"  - 🚨 [RateCtrl] 收到429！启动全局冷却，所有新请求将暂停 {delay:.1f} 秒。")
 
 
 # --- 模块 1.6: LLM 接口模块 ---
@@ -44,17 +110,28 @@ class BaseLLMConnector:
         provider_config: Dict[str, Any],
         debug_mode: bool = False,
         run_output_dir: Optional[Path] = None,
+        rate_control_manager: Optional[RateControlManager] = None,
+        dry_run: bool = False,
     ):
         self.provider_config = provider_config
         self.model_name = provider_config.get("model_name")
         self.debug_mode = debug_mode
         self.run_output_dir = run_output_dir
-        if self.debug_mode and self.run_output_dir:
+        self.rate_control_manager = rate_control_manager
+        self.dry_run = dry_run
+        
+        if self.dry_run:
+            log_with_timestamp("🚱 Dry-run 模式已激活。将跳过付费的LLM API调用。")
+
+        if (self.debug_mode or self.dry_run) and self.run_output_dir:
             self.snapshots_dir = self.run_output_dir / "prompt_snapshots"
             self.snapshots_dir.mkdir(exist_ok=True)
             log_with_timestamp(
-                f"🔍 调试模式已启用，Prompt快照将保存至: {self.snapshots_dir}"
+                f"🔍 Prompt快照功能已激活，将保存至: {self.snapshots_dir}"
             )
+        else:
+            self.snapshots_dir = None
+
         self.client = self._initialize_client()
         log_with_timestamp(
             f"🤖 {self.__class__.__name__} 已初始化 (模型: {self.model_name})"
@@ -63,19 +140,22 @@ class BaseLLMConnector:
     def _save_prompt_snapshot(
         self, prompt_name: str, system_prompt: Optional[str], user_prompt: Any
     ):
-        if not self.debug_mode or not self.run_output_dir:
+        if not self.snapshots_dir:
             return
-        user_prompt_str = (
-            "".join(str(item) for item in user_prompt)
-            if isinstance(user_prompt, list)
-            else str(user_prompt)
-        )
+        
+        user_prompt_str = ""
+        if isinstance(user_prompt, list):
+            for item in user_prompt:
+                if isinstance(item, str):
+                    user_prompt_str += item
+        else:
+            user_prompt_str = str(user_prompt)
+
         snapshot_content = f"--- SYSTEM PROMPT ---\n\n{system_prompt}\n\n"
         snapshot_content += f"--- USER PROMPT ---\n\n{user_prompt_str}"
         snapshot_path = self.snapshots_dir / f"{prompt_name}.txt"
         with open(snapshot_path, "w", encoding="utf-8") as f:
             f.write(snapshot_content)
-        log_with_timestamp(f"  - 📸 已保存Prompt快照: {snapshot_path.name}")
 
     def _initialize_client(self):
         raise NotImplementedError
@@ -97,11 +177,95 @@ class BaseLLMConnector:
 
 class GeminiConnector(BaseLLMConnector):
     def _initialize_client(self):
-        # *** 关键变更: 使用 genai.Client() 初始化客户端 ***
+        # 即使在 dry-run 模式下也需要客户端来调用免费的 count_tokens
         api_key = self.provider_config.get("api_key")
         if not api_key:
             raise ValueError("Gemini API key not found in config.")
-        return genai.Client(api_key=api_key)
+        
+        os.environ['GOOGLE_API_KEY'] = api_key
+        log_with_timestamp("  - 🔑 已通过环境变量设置 Gemini API Key。")
+        
+        try:
+            client = genai.Client()
+            return client
+        except Exception as e:
+            print(f"❌ 初始化 Gemini 客户端时发生未知错误: {e}")
+            print("   请确认您的 'google-genai' 库已正确安装且版本兼容。")
+            exit(1)
+
+    def _parse_retry_delay(self, error: Exception) -> Optional[float]:
+        if not isinstance(error, google_genai_errors.APIError):
+            return None
+        
+        error_str = str(error)
+        try:
+            retry_info_str = "'@type': 'type.googleapis.com/google.rpc.RetryInfo'"
+            if retry_info_str in error_str:
+                delay_str_start = error_str.find("'retryDelay': '", error_str.find(retry_info_str))
+                if delay_str_start != -1:
+                    delay_str_start += len("'retryDelay': '")
+                    delay_str_end = error_str.find("s'", delay_str_start)
+                    delay_seconds = float(error_str[delay_str_start:delay_str_end])
+                    return delay_seconds
+        except (ValueError, TypeError):
+            return None
+        return None
+
+    def _generate_with_manual_retry(self, **kwargs) -> types.GenerateContentResponse:
+        max_retries = 7
+        initial_delay = 2.0
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(**kwargs)
+                if attempt > 0:
+                    log_with_timestamp(f"  - ✅ 重试成功 (在第 {attempt + 1} 次尝试)!")
+                return response
+            
+            except google_genai_errors.APIError as e:
+                last_exception = e
+                should_retry = False
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+
+                error_code = getattr(e, 'code', None)
+
+                if error_code == 429:
+                    server_suggested_delay = self._parse_retry_delay(e)
+                    if server_suggested_delay is not None:
+                        delay = server_suggested_delay + random.uniform(0, 1)
+                    
+                    log_with_timestamp(f"  - ⚠️ API速率限制 (429), 尝试 {attempt + 1}/{max_retries}。")
+                    if self.rate_control_manager and server_suggested_delay is not None:
+                        self.rate_control_manager.trigger_cooldown(delay)
+                    else:
+                        log_with_timestamp(f"     将使用局部退避，在 {delay:.1f} 秒后重试...")
+                    should_retry = True
+
+                elif error_code in [500, 502, 503]:
+                     log_with_timestamp(f"  - ⚠️ API服务器错误 (Code: {error_code}, 尝试 {attempt + 1}/{max_retries})。将使用局部退避，在 {delay:.1f} 秒后重试...")
+                     should_retry = True
+                
+                if should_retry and attempt < max_retries - 1:
+                    time.sleep(delay)
+                    continue
+                else:
+                    break
+
+            except Exception as e:
+                last_exception = e
+                if ("SSL" in str(e) or "EOF" in str(e)) and attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                    log_with_timestamp(f"  - ⚠️ 捕获到底层网络错误, 尝试 {attempt + 1}/{max_retries}。将在 {delay:.1f} 秒后重试...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    log_with_timestamp(f"❌ API调用期间发生意外的本地编程错误: {e}")
+                    raise e
+
+        log_with_timestamp(f"  - ❌ 达到最大重试次数。最后一次错误: {last_exception}")
+        raise last_exception
+
 
     def generate(
         self,
@@ -112,40 +276,9 @@ class GeminiConnector(BaseLLMConnector):
         attachment_type: Optional[str] = None,
         prompt_name: str = "prompt",
     ) -> str:
-        log_with_timestamp(f"🚀 发起 Gemini API 调用 (Temperature: {temperature})...")
-
-        # *** 关键变更: 使用 types.GenerateContentConfig 和字典来构建配置 ***
-        config_dict = {
-            "temperature": temperature,
-            "safety_settings": [
-                types.SafetySetting(
-                    category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"
-                ),
-                types.SafetySetting(
-                    category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"
-                ),
-                types.SafetySetting(
-                    category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"
-                ),
-                types.SafetySetting(
-                    category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"
-                ),
-            ],
-        }
-
-        if self.provider_config.get("enable_thinking_mode", False):
-            log_with_timestamp("💡 检测到配置，为 Gemini 启用“动态思考预算”...")
-            # 正确的方式是在配置中加入 thinking_config
-            config_dict["thinking_config"] = types.ThinkingConfig(thinking_budget=-1)
-
-        if system_prompt:
-            config_dict["system_instruction"] = system_prompt
-
-        # 准备发送给 API 的内容
         contents = [user_prompt]
         if attachment_data:
             if attachment_type == "image":
-                log_with_timestamp("  - 正在将图片附件添加到 Gemini 请求中...")
                 contents.append(attachment_data)
             elif attachment_type == "text":
                 contents[0] = (
@@ -154,41 +287,51 @@ class GeminiConnector(BaseLLMConnector):
 
         self._save_prompt_snapshot(prompt_name, system_prompt, contents)
 
+        if self.dry_run:
+            return ""
+
+        config = types.GenerateContentConfig(
+            temperature=temperature,
+            safety_settings=[
+                types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
+            ],
+            system_instruction=system_prompt
+        )
+
         try:
-            # *** 关键变更: 使用新的 client.models.generate_content API ***
-            response = self.client.models.generate_content(
-                model=f"models/{self.model_name}",  # 新API需要 'models/' 前缀
+            response = self._generate_with_manual_retry(
+                model=f"models/{self.model_name}",
                 contents=contents,
-                config=config_dict,
+                config=config,
             )
             return response.text
         except Exception as e:
-            log_with_timestamp(f"❌ Gemini API 调用失败: {e}")
-            return f"[LLM 调用错误: {type(e).__name__} - {e}]"
-
-        return "[LLM 调用返回空]"
+            return f"[LLM_ERROR]: {e}"
 
     def count_tokens(self, text: str) -> int:
-        # *** 关键变更: 使用新的 client.models.count_tokens API ***
+        # count_tokens 是免费的，所以即使在 dry-run 模式下也执行以获得精确分块
+        if not self.client:
+             log_with_timestamp("  - ⚠️ Dry-run 模式下无客户端，使用粗算 Token。")
+             return len(tiktoken.get_encoding("cl100k_base").encode(text))
+            
         try:
             response = self.client.models.count_tokens(
-                model=f"models/{self.model_name}", contents=text
+                model=f"models/{self.model_name}",
+                contents=[text]
             )
             return response.total_tokens
         except Exception as e:
             log_with_timestamp(f"❌ Gemini Token 计数失败: {e}. 将使用粗算方法。")
-            # Fallback to rough estimation if API call fails
-            return self._estimate_rough_tokens_fallback(text)
-
-    def _estimate_rough_tokens_fallback(self, text: str) -> int:
-        # A simple fallback tokenizer if tiktoken is not desired here
-        # For simplicity, we assume tiktoken is available globally for now.
-        # This method is just a placeholder for a more robust fallback.
-        return len(text) // 4
+            return len(text) // 4
 
 
 class DeepSeekConnector(BaseLLMConnector):
     def _initialize_client(self):
+        if self.dry_run:
+            return None
         return OpenAI(
             api_key=self.provider_config["api_key"],
             base_url=self.provider_config["base_url"],
@@ -203,19 +346,22 @@ class DeepSeekConnector(BaseLLMConnector):
         attachment_type: Optional[str] = None,
         prompt_name: str = "prompt",
     ) -> str:
-        log_with_timestamp(f"🚀 发起 DeepSeek API 调用 (Temperature: {temperature})...")
-        if attachment_type == "image":
-            log_with_timestamp(
-                "❌ 错误: DeepSeek 的 OpenAI 兼容 API 当前不支持直接的图像输入。"
-            )
-            return "[错误: 此模型 API 不支持图像输入]"
-
         if attachment_type == "text" and attachment_data:
             user_prompt = (
                 f"### 补充上下文:\n{attachment_data}\n\n### 主要任务:\n{user_prompt}"
             )
 
         self._save_prompt_snapshot(prompt_name, system_prompt, user_prompt)
+
+        if self.dry_run:
+            return ""
+
+        log_with_timestamp(f"🚀 发起 DeepSeek API 调用 (Temperature: {temperature})...")
+        if attachment_type == "image":
+            log_with_timestamp(
+                "❌ 错误: DeepSeek 的 OpenAI 兼容 API 当前不支持直接的图像输入。"
+            )
+            return "[错误: 此模型 API 不支持图像输入]"
 
         try:
             messages = []
@@ -242,11 +388,13 @@ class LLMConnectorFactory:
         provider_config: Dict[str, Any],
         debug_mode: bool,
         run_output_dir: Path,
+        rate_control_manager: Optional[RateControlManager] = None,
+        dry_run: bool = False,
     ) -> BaseLLMConnector:
         if provider_name == "gemini":
-            return GeminiConnector(provider_config, debug_mode, run_output_dir)
+            return GeminiConnector(provider_config, debug_mode, run_output_dir, rate_control_manager, dry_run)
         elif provider_name == "deepseek":
-            return DeepSeekConnector(provider_config, debug_mode, run_output_dir)
+            return DeepSeekConnector(provider_config, debug_mode, run_output_dir, dry_run=dry_run)
         else:
             raise ValueError(f"不支持的 LLM provider: {provider_name}")
 
@@ -283,7 +431,7 @@ class DataFetcher:
         log_with_timestamp(
             f"💾 正在从数据库获取 {start_time.isoformat()} 到 {end_time.isoformat()} 的 OCR 数据..."
         )
-        query = "SELECT ocr.text, frm.timestamp AS captured_at FROM frames AS frm JOIN ocr_text AS ocr ON frm.id = ocr.frame_id WHERE frm.timestamp >= ? AND frm.timestamp <= ? ORDER BY frm.timestamp ASC;"
+        query = "SELECT frm.id as frame_id, ocr.text, frm.timestamp AS captured_at FROM frames AS frm JOIN ocr_text AS ocr ON frm.id = ocr.frame_id WHERE frm.timestamp >= ? AND frm.timestamp <= ? ORDER BY frm.timestamp ASC;"
         records = []
         try:
             with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
@@ -317,6 +465,16 @@ class DailyReportGenerator:
             )
         else:
             self.temperature = self.provider_config.get("temperature", 0.7)
+        
+        self.rate_control_manager = None
+        if self.llm_provider_name == 'gemini' and not self.cli_args.dry_run:
+            rate_limit_config = self.provider_config.get("rate_limiting", {})
+            self.rate_control_manager = RateControlManager(
+                rpm_limit=rate_limit_config.get("rpm", 15),
+                tpm_limit=rate_limit_config.get("tpm", 100000),
+                concurrency_limit=rate_limit_config.get("concurrency", 15)
+            )
+
         log_with_timestamp("正在加载 NLP 模型...")
         self.similarity_model = SentenceTransformer("all-MiniLM-L6-v2")
         self._setup_tokenizers()
@@ -329,6 +487,8 @@ class DailyReportGenerator:
                 provider_config=self.provider_config,
                 debug_mode=self.cli_args.debug,
                 run_output_dir=run_output_dir,
+                rate_control_manager=self.rate_control_manager,
+                dry_run=self.cli_args.dry_run,
             )
 
     def _load_task_template(self, task_name: str) -> Dict[str, str]:
@@ -367,7 +527,7 @@ class DailyReportGenerator:
     def _clean_data(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not records:
             return []
-        log_with_timestamp("🧹 开始数据清洗...")
+        log_with_timestamp("🧹 开始数据清洗 (sentence-transformers + difflib)...")
         high_similarity_threshold = self.config["high_similarity_threshold"]
         min_diff_chars = self.config["min_diff_chars"]
         first_valid_index = next(
@@ -405,6 +565,7 @@ class DailyReportGenerator:
         return cleaned_records
 
     def _estimate_precise_tokens(self, text: str) -> int:
+        # --- 最终修复：移除此处的 dry-run 判断，完全委托给 connector ---
         if self.llm_provider_name == "gemini":
             if not self.llm_connector:
                 raise RuntimeError(
@@ -421,7 +582,8 @@ class DailyReportGenerator:
     def _chunk_data_efficiently(
         self, records: List[Dict[str, Any]], max_chunk_tokens: int
     ) -> List[str]:
-        log_with_timestamp("⏳ 正在高效地对数据进行分段...")
+        log_with_timestamp("⏳ 正在高效地对数据进行分段 (API精算模式)...")
+        
         log_with_timestamp("  - 步骤1: 正在对所有记录进行Token粗算预计算...")
         utc_plus_8 = timezone(timedelta(hours=8))
         records_with_metadata = []
@@ -444,6 +606,7 @@ class DailyReportGenerator:
                 }
             )
         log_with_timestamp("  - ✅ 预计算完成。")
+
         chunks = []
         start_index = 0
         while start_index < len(records_with_metadata):
@@ -457,16 +620,19 @@ class DailyReportGenerator:
                     ]
                     break
                 end_index += 1
+            
             current_chunk_llm_texts = [
                 rec["text_for_llm"]
                 for rec in records_with_metadata[start_index:end_index]
             ]
             temp_chunk_text = "\n\n---\n\n".join(current_chunk_llm_texts)
+            
             log_with_timestamp(
-                f"  - 粗算打包完成一个块 (记录 {start_index}-{end_index-1}，粗算 {current_rough_tokens})，开始精算..."
+                f"  - 粗算打包完成一个块 (记录 {start_index}-{end_index-1}，粗算 {current_rough_tokens})，开始API精算..."
             )
             precise_tokens = self._estimate_precise_tokens(temp_chunk_text)
-            log_with_timestamp(f"  - 精算结果: {precise_tokens} tokens。")
+            log_with_timestamp(f"  - API精算结果: {precise_tokens} tokens。")
+
             while (
                 precise_tokens > max_chunk_tokens and len(current_chunk_llm_texts) > 1
             ):
@@ -489,8 +655,10 @@ class DailyReportGenerator:
                 temp_chunk_text = "\n\n---\n\n".join(current_chunk_llm_texts)
                 precise_tokens = self._estimate_precise_tokens(temp_chunk_text)
                 log_with_timestamp(f"  - 修正后精算结果: {precise_tokens} tokens。")
+            
             chunks.append(temp_chunk_text)
             start_index = end_index
+        
         log_with_timestamp(f"✅ 分段完成。数据被分为 {len(chunks)} 个段落。")
         return chunks
 
@@ -528,7 +696,7 @@ class DailyReportGenerator:
             log_with_timestamp("ℹ️ 无有效数据可处理，无法生成报告。")
             return
         self._initialize_llm_connector(run_output_dir)
-        log_with_timestamp("📉 执行分段摘要流程...")
+        log_with_timestamp("📉 执行标准分段摘要流程...")
         max_chunk_tokens = (
             self.provider_config["context_window"] - self.config["token_headroom"]
         )
@@ -540,8 +708,10 @@ class DailyReportGenerator:
         chunk_prompt_template = self.task_template["chunk_summary_prompt"]
         system_prompt = self.task_template.get("system_prompt")
         summaries = []
-        api_delay = self.provider_config.get("api_call_delay_seconds", 0)
+        
+        log_with_timestamp(f"  - 开始对 {len(chunks)} 个数据块进行摘要（采用智能重试，无固定延迟）...")
         for i, chunk in enumerate(chunks):
+            log_with_timestamp(f"  - 正在处理摘要 {i+1}/{len(chunks)}...")
             prompt_name = f"{i+1:02d}_chunk_summary_prompt"
             summary = self.llm_connector.generate(
                 user_prompt=chunk_prompt_template.format(chunk_text=chunk),
@@ -555,15 +725,263 @@ class DailyReportGenerator:
             with open(summary_path, "w", encoding="utf-8") as f:
                 f.write(summary)
             log_with_timestamp(f"  - ✅ 已保存摘要 {summary_filename}")
-            if i < len(chunks) - 1 and api_delay > 0:
-                log_with_timestamp(
-                    f"⏸️ 检测到 {self.llm_provider_name} 需要延迟调用，暂停 {api_delay} 秒..."
-                )
-                time.sleep(api_delay)
+
         llm_context = "\n\n".join(summaries)
         self._generate_final_report(
             llm_context, run_output_dir, attachment_data, attachment_type
         )
+
+    # --- 实验性功能：三步智能提纯法 ---
+    def _run_llm_refinement_flow(
+        self,
+        records: List[Dict[str, Any]],
+        run_output_dir: Path,
+        attachment_data: Optional[Any] = None,
+        attachment_type: Optional[str] = None,
+    ):
+        log_with_timestamp("🧪 开始执行实验性LLM智能提纯流程...")
+        self._initialize_llm_connector(run_output_dir)
+
+        # 步骤一：智能分类
+        classified_records = self._classify_records_with_llm(records, run_output_dir)
+        if not classified_records:
+            log_with_timestamp("  - 步骤一（分类）未产生有效数据，流程中止。")
+            return
+
+        # 步骤二：编程分组
+        record_groups = self._group_classified_records(classified_records)
+        if not record_groups:
+            log_with_timestamp("  - 步骤二（分组）未产生有效数据，流程中止。")
+            return
+
+        # 步骤三：上下文感知总结
+        final_context = self._summarize_record_groups(record_groups, run_output_dir)
+        if not final_context:
+            log_with_timestamp("  - 步骤三（总结）未产生有效内容，流程中止。")
+            return
+
+        # 使用提纯后的上下文生成最终报告
+        self._generate_final_report(final_context, run_output_dir, attachment_data, attachment_type)
+
+    def _classify_single_record(self, record: Dict[str, Any]) -> (Optional[str], Optional[str], int):
+        """Classifies a single record and returns (frame_id, category, total_tokens_used)."""
+        classification_prompt_template = self.config.get("llm_refinement_config", {}).get("classification_prompt")
+        if not classification_prompt_template:
+            raise ValueError("在 config.json 中未找到 'llm_refinement_config.classification_prompt'")
+
+        frame_id = str(record.get("frame_id"))
+        
+        json_data_for_single_record = json.dumps([
+            {"frame_id": frame_id, "text": record["text"]}
+        ], ensure_ascii=False)
+
+        prompt = classification_prompt_template.format(json_data=json_data_for_single_record)
+        
+        response = self.llm_connector._generate_with_manual_retry(
+            model=f"models/{self.llm_connector.model_name}",
+            contents=[prompt],
+            config=types.GenerateContentConfig(temperature=0.0)
+        )
+        
+        response_str = response.text
+        total_tokens = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and response.usage_metadata else 0
+
+        try:
+            response_str = response_str.strip().replace("```json", "").replace("```", "").strip()
+            classification_result = json.loads(response_str)
+            category = classification_result.get(frame_id, "Noise/UI")
+            
+            valid_categories = ['EmbeddedCoding', 'BuildAndCompile', 'DeploymentAndDebugging', 'FirmwareValidation', 'VersionControl', 'APIDebugging', 'HardwareAndRF', 'ResearchAndAI', 'Noise/UI']
+            if category in valid_categories:
+                return frame_id, category, total_tokens
+            else:
+                log_with_timestamp(f"  - ⚠️ 记录 {frame_id} 返回了无效分类 '{category}'，将标记为Noise/UI。")
+                return frame_id, "Noise/UI", total_tokens
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            log_with_timestamp(f"  - ❌ 解析记录 {frame_id} 的分类结果失败: {e}")
+            log_with_timestamp(f"  - 返回的原始文本: {response_str[:200]}...")
+            return frame_id, "Noise/UI", total_tokens
+
+    def _classify_records_with_llm(self, records: List[Dict[str, Any]], run_output_dir: Path) -> List[Dict[str, Any]]:
+        log_with_timestamp("  - 步骤一：原子化并发分类 (带全局速率控制)...")
+        
+        for i, record in enumerate(records):
+            if 'frame_id' not in record or not record['frame_id']:
+                record['frame_id'] = f"generated_id_{i}"
+
+        all_classifications = {}
+        
+        max_workers = 1 if self.cli_args.dry_run else (self.rate_control_manager.semaphore._value * 2 if self.rate_control_manager else 50)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            
+            def task_wrapper(record):
+                estimated_input_tokens = 0
+                actual_tokens_used = 0
+                if self.rate_control_manager:
+                    estimated_input_tokens = self._estimate_rough_tokens(record['text'])
+                    self.rate_control_manager.acquire(estimated_input_tokens)
+                
+                try:
+                    frame_id, category, actual_tokens_used = self._classify_single_record(record)
+                    return frame_id, category
+                finally:
+                    if self.rate_control_manager:
+                        release_tokens = actual_tokens_used if actual_tokens_used > 0 else estimated_input_tokens
+                        self.rate_control_manager.release(release_tokens)
+
+            future_to_record = {
+                executor.submit(task_wrapper, record): record
+                for record in records
+            }
+            
+            processed_count = 0
+            for future in concurrent.futures.as_completed(future_to_record):
+                record = future_to_record[future]
+                try:
+                    frame_id, category = future.result()
+                    if frame_id and category:
+                        all_classifications[frame_id] = category
+                except Exception as exc:
+                    log_with_timestamp(f"  - ❌ 记录 {record.get('frame_id')} 分类任务失败: {exc}")
+                
+                processed_count += 1
+                if processed_count % 100 == 0 or processed_count == len(records):
+                    log_with_timestamp(f"  - ...已处理 {processed_count}/{len(records)} 条记录...")
+
+        log_with_timestamp(f"  - ✅ 所有分类任务处理完毕，共获得 {len(all_classifications)} 条分类映射。")
+        
+        final_records = []
+        for record in records:
+            frame_id = str(record.get("frame_id"))
+            category = all_classifications.get(frame_id, "Noise/UI")
+            record["activity_type"] = category
+            final_records.append(record)
+        
+        classified_path = run_output_dir / "classified_records.json"
+        with open(classified_path, "w", encoding="utf-8") as f:
+            json.dump(final_records, f, ensure_ascii=False, indent=2)
+        log_with_timestamp(f"  - 💾 分类后数据已保存至: {classified_path}")
+        
+        return final_records
+
+    def _group_classified_records(self, classified_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        log_with_timestamp("  - 步骤二：编程分组...")
+        if not classified_records:
+            return []
+
+        groups = []
+        current_group = {
+            "type": classified_records[0].get("activity_type", "Noise/UI"),
+            "records": [classified_records[0]]
+        }
+
+        for record in classified_records[1:]:
+            activity_type = record.get("activity_type", "Noise/UI")
+            if activity_type == current_group["type"]:
+                current_group["records"].append(record)
+            else:
+                if current_group["type"] != "Noise/UI":
+                    groups.append(current_group)
+                current_group = {"type": activity_type, "records": [record]}
+        
+        if current_group["type"] != "Noise/UI":
+            groups.append(current_group)
+
+        log_with_timestamp(f"  - ✅ 分组完成，数据被分为 {len(groups)} 个有效活动块。")
+        return groups
+
+    def _summarize_record_groups(self, groups: List[Dict[str, Any]], run_output_dir: Path) -> str:
+        log_with_timestamp("  - 步骤三：并发上下文感知总结...")
+        summarization_prompts = self.config.get("llm_refinement_config", {}).get("summarization_prompts", {})
+        if not summarization_prompts:
+            log_with_timestamp("  - ❌ 错误: 在config.json中未找到'llm_refinement_config.summarization_prompts'。")
+            return ""
+
+        summaries_dir = run_output_dir / "llm_refinement_summaries"
+        summaries_dir.mkdir(exist_ok=True)
+
+        tasks = []
+        for i, group in enumerate(groups):
+            if group.get("type", "Noise/UI") != "Noise/UI":
+                tasks.append((group, i + 1))
+
+        final_summaries = [None] * len(tasks)
+        
+        max_workers = 1 if self.cli_args.dry_run else (self.rate_control_manager.semaphore._value if self.rate_control_manager else 20)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            
+            def task_wrapper(group, group_index):
+                estimated_input_tokens = 0
+                actual_tokens_used = 0
+                context_text = "\n--- NEW_FRAME ---\n".join([r["text"] for r in group["records"]])
+
+                if self.rate_control_manager:
+                    estimated_input_tokens = self._estimate_rough_tokens(context_text)
+                    self.rate_control_manager.acquire(estimated_input_tokens)
+                
+                try:
+                    summary, actual_tokens_used = self._summarize_single_group(group, group_index, context_text)
+                    return summary
+                finally:
+                    if self.rate_control_manager:
+                        release_tokens = actual_tokens_used if actual_tokens_used > 0 else estimated_input_tokens
+                        self.rate_control_manager.release(release_tokens)
+
+            future_to_index = {
+                executor.submit(task_wrapper, task_data[0], task_data[1]): i
+                for i, task_data in enumerate(tasks)
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    summary_text = future.result()
+                    final_summaries[index] = summary_text
+                except Exception as exc:
+                    log_with_timestamp(f"  - ❌ 总结任务 {index + 1} 失败: {exc}")
+        
+        valid_summaries = [s for s in final_summaries if s is not None]
+        for i, summary_text in enumerate(valid_summaries):
+             summary_path = summaries_dir / f"{i+1:02d}_summary.txt"
+             with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(summary_text)
+
+        log_with_timestamp(f"  - ✅ 总结完成，生成了 {len(valid_summaries)} 条有效活动摘要。")
+        return "\n\n".join(valid_summaries)
+
+    def _summarize_single_group(self, group: Dict[str, Any], group_index: int, context_text: str) -> (str, int):
+        group_type = group.get("type", "default")
+        summarization_prompts = self.config["llm_refinement_config"]["summarization_prompts"]
+        prompt_template = summarization_prompts.get(group_type, summarization_prompts.get("default"))
+        
+        if not prompt_template:
+            raise ValueError(f"No summary prompt found for type '{group_type}'")
+
+        prompt = prompt_template.format(data=context_text)
+
+        system_prompt = f"你是一个专家级的活动总结助理，当前正在分析一个 '{group_type}' 类型的活动。"
+        
+        config = types.GenerateContentConfig(
+            temperature=0.3,
+            system_instruction=system_prompt
+        )
+
+        response = self.llm_connector._generate_with_manual_retry(
+            model=f"models/{self.llm_connector.model_name}",
+            contents=[prompt],
+            config=config
+        )
+        
+        summary = response.text
+        total_tokens = response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') and response.usage_metadata else 0
+
+        first_record = group['records'][0]
+        utc_time = datetime.fromisoformat(first_record["captured_at"].replace("Z", "+00:00"))
+        local_time_str = utc_time.astimezone(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
+
+        formatted_summary = f"**活动: {group_type}** (从 {local_time_str} 开始)\n- {summary.strip()}"
+        return formatted_summary, total_tokens
 
     def run(
         self,
@@ -586,9 +1004,21 @@ class DailyReportGenerator:
         with open(cleaned_data_path, "w", encoding="utf-8") as f:
             json.dump(cleaned_records, f, ensure_ascii=False, indent=2)
         log_with_timestamp(f"💾 已清洗的数据已缓存至: {cleaned_data_path}")
-        self._process_records(
-            cleaned_records, run_output_dir, attachment_data, attachment_type
-        )
+
+        if self.cli_args.enable_llm_refinement:
+            if self.llm_provider_name == 'gemini':
+                self._run_llm_refinement_flow(
+                    cleaned_records, run_output_dir, attachment_data, attachment_type
+                )
+            else:
+                log_with_timestamp("⚠️ 警告: LLM智能提纯功能当前仅支持Gemini。将执行标准流程。")
+                self._process_records(
+                    cleaned_records, run_output_dir, attachment_data, attachment_type
+                )
+        else:
+            self._process_records(
+                cleaned_records, run_output_dir, attachment_data, attachment_type
+            )
 
     def run_from_summaries(
         self,
@@ -645,9 +1075,21 @@ class DailyReportGenerator:
         run_output_dir = Path(self.config["output_path"]) / session_name
         run_output_dir.mkdir(parents=True, exist_ok=True)
         log_with_timestamp(f"📂 本次缓存处理会话目录已创建: {run_output_dir}")
-        self._process_records(
-            cleaned_records, run_output_dir, attachment_data, attachment_type
-        )
+        
+        if self.cli_args.enable_llm_refinement:
+            if self.llm_provider_name == 'gemini':
+                self._run_llm_refinement_flow(
+                    cleaned_records, run_output_dir, attachment_data, attachment_type
+                )
+            else:
+                log_with_timestamp("⚠️ 警告: LLM智能提纯功能当前仅支持Gemini。将执行标准流程。")
+                self._process_records(
+                    cleaned_records, run_output_dir, attachment_data, attachment_type
+                )
+        else:
+            self._process_records(
+                cleaned_records, run_output_dir, attachment_data, attachment_type
+            )
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -713,6 +1155,16 @@ if __name__ == "__main__":
         "--debug",
         action="store_true",
         help="启用调试模式，将保存发送给LLM的完整Prompt快照。",
+    )
+    parser.add_argument(
+        "--enable-llm-refinement",
+        action="store_true",
+        help="[实验性功能, Gemini专用] 启用三步LLM智能提纯流程，以获得更高质量的摘要。",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="仅生成Prompt快照和空的摘要文件，不执行任何LLM API调用。",
     )
     args = parser.parse_args()
 
